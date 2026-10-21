@@ -48,7 +48,10 @@ Every change must keep all four green: tests, ruff check, ruff format, docs buil
 
 Local, git-ignored folders you may see in the author's working copy (`SS/`,
 `Monitoring files/`, `.idea/`) contain personal data and legacy scripts. **Never read
-them into commits, tests or docs.**
+them into commits, tests or docs.** Files named `*.local.md` (for example
+`MAINTAINER_TODO.local.md`, the maintainer's private list of manual tasks) are
+git-ignored personal notes: you may read them for context, but never commit them or
+copy their content into tracked files.
 
 ## Domain knowledge (do not break these rules)
 
@@ -100,7 +103,8 @@ them into commits, tests or docs.**
 ## Privacy and security (hard rules)
 
 - Tracking links are personal. Never commit real UUIDs, workbooks (`*.xlsx`),
-  reports (`changes_*.txt`), logs, `config.toml` or `state.json`.
+  reports (`changes_*.txt`), logs, `config.toml`, `state.json` or private notes
+  (`*.local.md`).
 - In examples use the demo UUID or obviously fake ones
   (`11111111-2222-3333-4444-555555555555`, `aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`).
 - `tests/test_repository_hygiene.py` enforces this on tracked files; do not weaken it.

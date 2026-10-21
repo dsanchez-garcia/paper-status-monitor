@@ -43,6 +43,7 @@ def test_no_data_files_are_tracked() -> None:
         for path in tracked_files()
         if path.suffix.lower() in FORBIDDEN_SUFFIXES
         or path.name in FORBIDDEN_NAMES
+        or path.name.endswith(".local.md")
         or path.name.startswith(("changes_", "monitor_submission_log_"))
     ]
     assert offenders == [], f"personal data files must not be committed: {offenders}"

@@ -16,6 +16,8 @@ monitor_submission*
 *.lnk
 *.bat
 *.log
+# Private local notes, e.g. the maintainer's to-do list (MAINTAINER_TODO.local.md)
+*.local.md
 
 # ---------------------------------------------------------------------------
 # Python
