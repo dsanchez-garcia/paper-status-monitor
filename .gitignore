@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Personal data: NEVER commit it (see AGENTS.md -> Privacy and security).
+# ---------------------------------------------------------------------------
+/Monitoring files/
+/SS/
+config.toml
+state.json
+run.lock
+reports/
+changes_*.txt
+monitor_submission*
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+*.lnk
+*.bat
+*.log
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Documentation
+docs/_build/
+
+# ---------------------------------------------------------------------------
+# Editors, operating systems and sync clients
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+.~lock.*
+*.tmp
+

@@ -1,0 +1,130 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paper-status-monitor"
+dynamic = ["version"]
+description = "Monitor the peer-review status of your Elsevier submissions and keep one Excel history per manuscript."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Daniel Sánchez-García", email = "daniel.sanchezgarcia@uca.es" }]
+keywords = [
+    "elsevier",
+    "peer review",
+    "manuscript",
+    "submission tracking",
+    "academic publishing",
+    "excel",
+    "automation",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+dependencies = [
+    "openpyxl>=3.1",
+    "requests>=2.28",
+    "tomli>=1.1; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.2",
+    "myst-parser>=2.0",
+    "sphinx-rtd-theme>=2.0",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.6",
+    "build>=1.0",
+    "twine>=5.0",
+]
+
+[project.scripts]
+paper-status-monitor = "paper_status_monitor.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/dsanchez-garcia/paper-status-monitor"
+Documentation = "https://paper-status-monitor.readthedocs.io"
+Source = "https://github.com/dsanchez-garcia/paper-status-monitor"
+Issues = "https://github.com/dsanchez-garcia/paper-status-monitor/issues"
+Changelog = "https://github.com/dsanchez-garcia/paper-status-monitor/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/paper_status_monitor/_version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/examples",
+    "/CHANGELOG.md",
+    "/README.md",
+    "/LICENSE",
+]
+exclude = ["/docs/_build"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paper_status_monitor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not network'"
+markers = [
+    "network: tests that call the real tracker API (deselected by default, run with -m network)",
+]
+
+[tool.coverage.run]
+source = ["paper_status_monitor"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+extend-exclude = ["docs/_build"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "C4",  # flake8-comprehensions
+    "PT",  # flake8-pytest-style
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "RUF001", # ambiguous unicode characters in strings (the reports use "→" on purpose)
+    "RUF002", # ambiguous unicode characters in docstrings
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["paper_status_monitor"]
+
