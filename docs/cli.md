@@ -37,15 +37,71 @@ paper-status-monitor init [--data-dir PATH] [--force]
 Add a submission to the configuration file.
 
 ```console
-paper-status-monitor add LINK_OR_UUID [--label TEXT] [--no-verify]
+paper-status-monitor add LINK_OR_UUID [--label TEXT] [--field NAME=VALUE ...] [--no-verify]
 ```
 
 The tracker is contacted first to make sure the link works; the title and journal
 found are printed. Use `--no-verify` to skip that step (for instance, when offline).
 
+`--label TEXT`
+: Short name shown by `list` and in the reports.
+
+`--field NAME=VALUE`
+: Custom field of the submission, repeatable: `--field paper=TMY --field
+  project=Thesis`. Custom fields can be used in the workbook names (`{paper}`) and are
+  written to extra columns (see {doc}`configuration`).
+
+## `remove`, `disable` and `enable`
+
+Remove a submission from the configuration, or pause and resume its monitoring.
+
+```console
+paper-status-monitor remove SUBMISSION
+paper-status-monitor disable SUBMISSION     # also: pause
+paper-status-monitor enable SUBMISSION      # also: resume
+```
+
+`SUBMISSION` is the tracking link, the UUID, the label (case-insensitive) or the
+number shown by `list`. The configuration file is edited in place, so your comments
+are kept: `remove` deletes the `[[submissions]]` table (with the comment lines
+written right above it), `disable` and `enable` change or add its `enabled` line.
+The previous file is kept as `config.toml.bak`, and workbooks are never deleted.
+
+```console
+paper-status-monitor disable "TMY paper"
+paper-status-monitor list                   # 1. TMY paper  [paused]
+paper-status-monitor enable 1
+```
+
 ## `list`
 
-Show the configured submissions with their last recorded status and workbook.
+Show the naming template and the configured submissions with their custom fields,
+their last recorded status and their workbook.
+
+## `summary`
+
+Show one table with the latest recorded status of every submission: journal,
+manuscript number, status and since when, reviews (completed / accepted / invited)
+and the last review activity. It is read from the workbooks; nothing is downloaded.
+
+```console
+paper-status-monitor summary [--format text|markdown|html] [--output FILE]
+```
+
+`--format FORMAT`
+: `text` (default, an aligned table), `markdown` or `html` (a standalone page).
+
+`-o FILE`, `--output FILE`
+: Write the table to `FILE` instead of showing it.
+
+```text
+#  Submission        Journal               Manuscript number  Status                     Since                 Reviews     Last review activity
+1  TMY paper         Energy and Buildings  ENB-D-26-00001R1   Required Reviews Complete  2026-02-01 (30 days)  2 / 2 / 2+  2nd February 2026
+2  [paused] Comfort  -                     -                  not recorded yet           -                     -           -
+```
+
+*Since* is the date on which the current status was first recorded. The table does
+not contain the tracking links, so it can be shared.
 
 ## `check`
 
@@ -64,33 +120,94 @@ Check every enabled submission, append changes to the workbooks, write a report 
 there is news and save a summary of the run.
 
 ```console
-paper-status-monitor run [--wait SECONDS] [--no-open] [--dry-run]
+paper-status-monitor run [--wait SECONDS] [--every INTERVAL] [--notify CHANNELS]
+                         [--no-open] [--dry-run]
+                         [--record-fields COLUMNS] [--record-ignore COLUMNS]
+                         [--notify-fields COLUMNS] [--notify-ignore COLUMNS]
 ```
 
 `--wait SECONDS`
-: Before checking, wait up to `SECONDS` for the data folder to be available and for
-  the tracker to be reachable. Useful right after logging in, when the network or a
-  cloud drive is not ready yet. The autostart launcher uses `--wait 300`.
+: Before each check, wait up to `SECONDS` for the data folder to be available and
+  for the tracker to be reachable. Useful right after logging in or after the
+  computer wakes up, when the network or a cloud drive is not ready yet. The
+  autostart launcher uses `--wait 300`.
+
+`--every INTERVAL`
+: Keep running: check now and then once every `INTERVAL` (`12h`, `1d`, `1h30m`...;
+  the minimum is `1h`), until the process is stopped (`Ctrl+C`, or logging out).
+  The configuration file is read again before every check, and a computer that was
+  asleep or hibernated catches up with one check shortly after it wakes up. See
+  *Periodic checks* in {doc}`autostart`.
+
+`--notify CHANNELS`
+: How to tell you about news in this run, instead of the `notify` setting: `report`
+  (open the report), `toast` (desktop notification), `report,toast` or `none`.
 
 `--no-open`
-: Do not open the report, even if `open_report = true`.
+: Do not open the report (it is still written). A desktop notification is still
+  shown if `notify` includes `toast`.
 
 `--dry-run`
 : Fetch and compare, print the changes, but write nothing.
 
-Only one run can be active at a time; a second one exits with an error.
+`--record-fields COLUMNS`, `--record-ignore COLUMNS`, `--notify-fields COLUMNS`, `--notify-ignore COLUMNS`
+: Override the settings of the same name (see *What is recorded and what is
+  notified* in {doc}`configuration`) for this run only. `COLUMNS` is a
+  comma-separated list of column names, case-insensitive; `all` selects every
+  column and `none` empties a list. For example:
+
+  ```console
+  paper-status-monitor run --notify-fields Status
+  paper-status-monitor run --notify-ignore "Last review activity,Status code"
+  ```
+
+The console summary tags every submission: `[NEW]`, `[CHANGED]` (reportable
+changes; changes that are only recorded are marked `(not notified)`), `[RECORDED]`
+(a row was added, but nothing is reported), `[NO CHANGE]` or `[ERROR]`.
+
+Only one run can be active at a time; a second one exits with an error. With
+`--every`, the lock is only held during each check: a periodic check that finds
+another run in progress is skipped and logged.
+
+## `organize`
+
+Rename or merge existing workbooks so that their names follow the
+`workbook_name` template (see {doc}`workbooks`).
+
+```console
+paper-status-monitor organize [--dry-run]
+```
+
+`--dry-run`
+: Only print the renames and merges that would be done.
+
+Workbooks are merged in chronological order after a copy of each one is saved in
+the `backups` subfolder of the data folder. Workbooks that also hold rows of
+submissions that are not in the configuration are left untouched.
+
+## `gui`
+
+Open the graphical interface (see {doc}`gui`). It is also installed as a separate
+command, `paper-status-monitor-gui`, that does not open a console window on Windows.
+
+```console
+paper-status-monitor gui
+```
 
 ## `autostart`
 
 Manage the Windows Startup shortcut (see {doc}`autostart`).
 
 ```console
-paper-status-monitor autostart enable [--wait SECONDS]
+paper-status-monitor autostart enable [--wait SECONDS] [--every INTERVAL]
 paper-status-monitor autostart disable
 paper-status-monitor autostart status
 ```
 
-When `--config` is given to `autostart enable`, the shortcut uses that file.
+When `--config` is given to `autostart enable`, the shortcut uses that file. With
+`--every 12h`, the program started at login keeps checking every 12 hours while you
+stay logged in (see *Periodic checks* in {doc}`autostart`). `status` shows the
+shortcut, its interpreter, its arguments and when the checks run.
 
 ## `doctor`
 
@@ -99,14 +216,21 @@ Diagnose the installation and print one line per check:
 ```text
 [INFO] paper-status-monitor 0.1.0, Python 3.13.1
 [ OK ] Configuration: C:\Users\me\AppData\Roaming\paper-status-monitor\config.toml (2 enabled submission(s))
+[INFO] Changes recorded: all columns
+[INFO] Changes notified: all columns except Last review activity
+[INFO] When there is news: the report is opened and a desktop notification is shown
+[INFO] Workbook names: {paper} - {journal} - {manuscript_number}
 [ OK ] Data folder: C:\Users\me\Documents\Paper status (2 workbook(s))
 [ OK ] Tracker reachable (demo submission status: Under Review)
-[ OK ] Autostart enabled: paper-status-monitor.lnk -> C:\Python313\pythonw.exe -m paper_status_monitor run --wait 300
+[ OK ] Autostart enabled: paper-status-monitor.lnk -> C:\Python313\pythonw.exe -m paper_status_monitor run --wait 300 --every 12h
 [ OK ] Last run: 2026-10-21 08:55:14 (2 checked, 0 changed, 0 failed)
 ```
 
 The autostart check also verifies that the interpreter used at login can import the
 package — the most common reason for silent failures after reinstalling Python.
+`doctor` also warns when existing workbooks do not follow the naming template, and
+when desktop notifications are chosen but cannot be shown (for example, when
+`notify-send` is missing on Linux).
 
 ## Running as a module
 

@@ -4,8 +4,10 @@
 /Monitoring files/
 /SS/
 config.toml
+config.toml.bak
 state.json
 run.lock
+.paper-status-monitor.json
 reports/
 changes_*.txt
 monitor_submission*

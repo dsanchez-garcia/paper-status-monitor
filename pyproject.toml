@@ -61,6 +61,9 @@ dev = [
 [project.scripts]
 paper-status-monitor = "paper_status_monitor.cli:main"
 
+[project.gui-scripts]
+paper-status-monitor-gui = "paper_status_monitor.gui:main"
+
 [project.urls]
 Homepage = "https://github.com/dsanchez-garcia/paper-status-monitor"
 Documentation = "https://paper-status-monitor.readthedocs.io"

@@ -13,6 +13,9 @@ Most important points:
 - Never commit tracking UUIDs, workbooks, reports, logs or configuration files. Use
   the demo UUID `00000000-0000-0000-0000-000000000000` in examples.
 - The workbook key is the base manuscript number (without `R1`, `R2`...), never the
-  title.
+  title. Several submissions may share a workbook (`workbook_name` template): compare
+  with the last row of the submission, not of the workbook.
+- Recording and notifying are independent (`record_*` / `notify_*` settings); how news
+  is announced is `notify` (`report`, `toast`, `none`), and the report is always written.
 - Update `CHANGELOG.md` (*Unreleased*) and `TODO.md` when relevant.
 

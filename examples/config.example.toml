@@ -1,28 +1,47 @@
 # Example configuration for paper-status-monitor.
 # Copy it to the default location (on Windows: %APPDATA%\paper-status-monitor\config.toml)
-# or create your own with:  paper-status-monitor init
+# or create your own with:  paper-status-monitor init  (or paper-status-monitor gui)
 # Documentation: https://paper-status-monitor.readthedocs.io/en/latest/configuration.html
 
-# Folder where one Excel workbook per manuscript and the change reports are stored.
+# Folder where the Excel workbooks and the change reports are stored.
 # On Windows, use single quotes (literal strings) or forward slashes.
 data_dir = '~/Documents/paper-status-monitor'
 
-# Open the change report with your default text editor when something changes.
-open_report = true
+# Name of the workbooks, built from placeholders: {manuscript_number}, {journal},
+# {journal_acronym}, {title}, {first_author}, {corresponding_author},
+# {date_of_submission} (YYYY-MM-DD), {submission_year}, {label} and the custom fields
+# of the submissions (below, {paper}). Submissions whose names coincide share a
+# workbook, so "{paper}" would keep all the submissions of a paper in one file.
+workbook_name = "{paper} - {journal} - {manuscript_number}"
 
-# Also write (and open) a report when a submission cannot be checked.
+# Changes that add a row to the workbook: "all" or a list of columns such as
+# ["Status"], and columns whose changes alone never add a row.
+record_fields = "all"
+record_ignore = []
+
+# Changes that are reported: "all" or a list of columns such as ["Status"], and
+# columns whose changes are recorded but never reported. Here, a new date of last
+# review activity is kept in the workbook without opening a report.
+notify_fields = "all"
+notify_ignore = ["Last review activity"]
+
+# How you are told about news. A report is always written to the 'reports'
+# subfolder of data_dir; "report" also opens it with your text editor and "toast"
+# shows a desktop notification. Use a list for both, or "none".
+notify = ["report", "toast"]
+
+# Also report (and notify) the submissions that cannot be checked.
 notify_on_errors = true
-
-# Columns whose changes are recorded in the workbook but do not trigger a report.
-ignore_fields = []
 
 # Seconds to wait for each answer from the tracker.
 request_timeout = 30
 
 # One block per manuscript. The UUID below is the public demo submission served by
 # the tracker (fictional data); replace it with the link from your own e-mail.
+# 'fields' holds your own fields, for the workbook names and as extra columns.
 [[submissions]]
 url = "https://track.authorhub.elsevier.com/?uuid=00000000-0000-0000-0000-000000000000"
 label = "Demo submission"
+fields = { paper = "Demo" }
 enabled = true
 

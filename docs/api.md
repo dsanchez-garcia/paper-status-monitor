@@ -15,6 +15,8 @@ print(snapshot.display_title, snapshot.status, snapshot.reviews_completed)
 summary = Monitor(load_config()).run()
 for result in summary.changed:
     print(result.name, [str(change) for change in result.changes])
+for result in summary.recorded:
+    print(result.name, "recorded:", [str(change) for change in result.recorded_changes])
 ```
 
 The public names are re-exported by the top-level package. Everything else may
@@ -44,10 +46,22 @@ change between minor versions until 1.0.
 .. automodule:: paper_status_monitor.config
 ```
 
+## Workbook names
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.naming
+```
+
 ## Workbook storage
 
 ```{eval-rst}
 .. automodule:: paper_status_monitor.storage
+```
+
+## Organizing workbooks
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.organize
 ```
 
 ## Reports
@@ -56,10 +70,34 @@ change between minor versions until 1.0.
 .. automodule:: paper_status_monitor.report
 ```
 
+## Desktop notifications
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.notifications
+```
+
+## Periodic checks
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.scheduling
+```
+
+## Summary table
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.summary
+```
+
 ## Run state
 
 ```{eval-rst}
 .. automodule:: paper_status_monitor.state
+```
+
+## Graphical interface
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.gui
 ```
 
 ## Autostart (Windows)

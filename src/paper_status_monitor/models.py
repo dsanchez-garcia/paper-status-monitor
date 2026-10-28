@@ -48,6 +48,9 @@ FIELD_LABELS: dict[str, str] = {
 #: Columns compared between two snapshots to detect changes.
 TRACKED_COLUMNS: tuple[str, ...] = tuple(FIELD_LABELS.values())
 
+#: Column with the manuscript number (including the ``R<n>`` revision suffix).
+MANUSCRIPT_NUMBER_COLUMN = FIELD_LABELS["manuscript_number"]
+
 #: Metadata column with the local date and time at which a row was recorded.
 DETECTED_AT_COLUMN = "Detected at"
 
@@ -84,6 +87,7 @@ _MONTHS = (
 )
 _REVISION_SUFFIX = re.compile(r"R(\d+)$")
 _REVISION_PREFIX = re.compile(r"^\[\d+(?:st|nd|rd|th) revision\]\s*", re.IGNORECASE)
+_TRACKER_DATE = re.compile(r"^(\d{1,2})(?:st|nd|rd|th)\s+([A-Za-z]+)\s+(\d{4})$", re.IGNORECASE)
 
 
 def ordinal(number: int) -> str:
@@ -114,6 +118,28 @@ def format_tracker_date(timestamp: Any, tz: tzinfo | None = None) -> str:
     except (OverflowError, OSError, ValueError):
         return str(timestamp)
     return f"{ordinal(moment.day)} {_MONTHS[moment.month - 1]} {moment.year}"
+
+
+def parse_tracker_date(text: str) -> date | None:
+    """Parse a date written by :func:`format_tracker_date` (``"3rd March 2020"``).
+
+    Returns:
+        The date, or ``None`` if *text* is empty or not in that format.
+    """
+    match = _TRACKER_DATE.match(clean_text(text))
+    if match is None:
+        return None
+    day, month_name, year = match.groups()
+    months = [name.casefold() for name in _MONTHS]
+    try:
+        return date(int(year), months.index(month_name.casefold()) + 1, int(day))
+    except ValueError:  # unknown month name or impossible day
+        return None
+
+
+def base_manuscript_number(manuscript_number: str) -> str:
+    """Remove the revision suffix from a manuscript number (``"X-D-24-1R2"`` -> ``"X-D-24-1"``)."""
+    return _REVISION_SUFFIX.sub("", clean_text(manuscript_number))
 
 
 def status_label(code: int | None) -> str:
@@ -252,9 +278,9 @@ class Snapshot:
         """Manuscript number without the revision suffix (``"ABC-D-24-00001"``).
 
         It identifies one manuscript in one journal and is therefore used as the
-        key of the workbook: every revision of the manuscript shares it.
+        key of its history: every revision of the manuscript shares it.
         """
-        return _REVISION_SUFFIX.sub("", self.manuscript_number)
+        return base_manuscript_number(self.manuscript_number)
 
     @property
     def display_title(self) -> str:

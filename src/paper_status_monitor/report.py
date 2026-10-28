@@ -1,4 +1,4 @@
-"""Human-readable output: console summary, text report and opening the report."""
+"""Human-readable output: console summary, text report, notifications and opening files."""
 
 from __future__ import annotations
 
@@ -6,9 +6,13 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
+from paper_status_monitor import notifications, paths
+from paper_status_monitor.config import Config
 from paper_status_monitor.monitor import RunSummary, SubmissionResult
+from paper_status_monitor.naming import custom_field_column
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +32,8 @@ def _details(result: SubmissionResult) -> list[str]:
         lines.append(f"  Manuscript number: {snapshot.manuscript_number or '-'}")
     if result.submission.label:
         lines.append(f"  Label: {result.submission.label}")
+    for name, value in result.submission.fields.items():
+        lines.append(f"  {custom_field_column(name)}: {value or '-'}")
     lines.append(f"  Tracker: {result.submission.tracker_url}")
     if result.workbook is not None:
         lines.append(f"  Workbook: {result.workbook}")
@@ -77,9 +83,14 @@ def render_report(summary: RunSummary, *, include_errors: bool = True) -> str:
 
 
 def render_console(summary: RunSummary) -> str:
-    """Return a compact, one-line-per-submission summary for the terminal."""
+    """Return a compact, one-line-per-submission summary for the terminal.
+
+    Submissions with reportable changes are tagged ``[CHANGED]``; those with
+    changes that were recorded without being reported are tagged ``[RECORDED]``.
+    """
     count = len(summary.results)
     lines = [f"Checked {count} submission(s) at {summary.started_at:%Y-%m-%d %H:%M:%S}"]
+    indent = " " * 16
     for result in summary.results:
         if not result.ok:
             lines.append(f"  [ERROR]     {result.name}: {result.error}")
@@ -88,7 +99,11 @@ def render_console(summary: RunSummary) -> str:
             lines.append(f"  [NEW]       {result.name} ({status})")
         elif result.changes:
             lines.append(f"  [CHANGED]   {result.name}")
-            lines += [f"                - {change}" for change in result.changes]
+            lines += [f"{indent}- {change}" for change in result.changes]
+            lines += [f"{indent}- {change} (not notified)" for change in result.unreported_changes]
+        elif result.recorded_changes:
+            lines.append(f"  [RECORDED]  {result.name} (not notified)")
+            lines += [f"{indent}- {change}" for change in result.recorded_changes]
         else:
             lines.append(f"  [NO CHANGE] {result.name}")
     return "\n".join(lines)
@@ -125,6 +140,48 @@ def write_report(
             last_error = exc
     assert last_error is not None
     raise last_error
+
+
+def publish_report(
+    summary: RunSummary, config: Config, *, channels: Iterable[str] | None = None
+) -> Path | None:
+    """Write the report of a run if it has news, and tell the user about it.
+
+    The report goes to :attr:`Config.reports_dir`, or to the local fallback folder
+    if the data folder is not available. Then, depending on *channels*, it is
+    opened (``"report"``) and a desktop notification is shown (``"toast"``; see
+    :mod:`~paper_status_monitor.notifications`). Failures are logged, never raised.
+
+    Args:
+        summary: The run.
+        config: Configuration (reports folder, ``notify_on_errors``).
+        channels: How to tell the user; defaults to :attr:`Config.notify`.
+
+    Returns:
+        The report written (also stored in ``summary.report_path``), or ``None``.
+    """
+    chosen = set(config.notify if channels is None else channels)
+    include_errors = config.notify_on_errors
+    if not should_write_report(summary, include_errors=include_errors):
+        return None
+    path: Path | None = None
+    try:
+        path = write_report(
+            summary,
+            config.reports_dir,
+            fallback_directory=paths.fallback_reports_dir(),
+            include_errors=include_errors,
+        )
+    except OSError as exc:
+        log.error("The report could not be written: %s", exc)
+    else:
+        summary.report_path = path
+        log.info("Report written to %s", path)
+        if "report" in chosen:
+            open_path(path)
+    if "toast" in chosen:
+        notifications.notify_run(summary, include_errors=include_errors, report=path)
+    return path
 
 
 def open_path(path: Path) -> bool:

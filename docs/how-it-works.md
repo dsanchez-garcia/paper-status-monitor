@@ -54,8 +54,9 @@ The conversion reproduces the logic of the official page:
 Because the page collapses many internal codes into *Review Complete*, the raw
 `Status code` is also recorded. A change of code without a change of label means
 that something happened behind the scenes (for example, the editor started working
-on a decision). Add `"Status code"` to `ignore_fields` if you do not want to be
-notified about those changes.
+on a decision). Add `"Status code"` to `notify_ignore` if you do not want to be
+notified about those changes (they are still recorded), or to `record_ignore` if you
+do not want them to add rows either.
 
 ```{note}
 The meaning of the internal codes is not documented. Contributions that map codes to
@@ -71,10 +72,18 @@ editorial stages, based on your own observations, are welcome.
    1. fetch the JSON record (with retries and back-off on network errors, HTTP 429
       and 5xx);
    2. convert it to a snapshot of display values;
-   3. find the workbook by base manuscript number, or create it;
-   4. compare the snapshot with the last row and append a row if anything changed.
-4. Write a report if there is news (or errors), open it, and store a summary of the
-   run for `doctor`.
+   3. find the workbook that already holds its history (by manuscript number or
+      tracking link), or the workbook named by the `workbook_name` template;
+   4. compare the snapshot with the last row of the submission and append a row if
+      a *recorded* column changed (`record_fields`, `record_ignore`);
+   5. compare the snapshot with the last state seen and keep the changes in
+      *notified* columns (`notify_fields`, `notify_ignore`) for the report.
+4. Write a report if there is news (or errors), tell you about it as chosen with
+   `notify` (open the report, show a desktop notification), and store a summary of
+   the run for `doctor` and the last state seen of every submission.
+
+With `run --every`, these steps are repeated at the chosen interval; the lock is held
+only during each check.
 
 A failure in one submission never stops the others, and every failure ends up in the
 log file and, by default, in the report.
@@ -85,7 +94,8 @@ The tracker is a public service run by Elsevier for authors. This tool:
 
 - only requests the submissions **you** configure, with your own links;
 - identifies itself with a descriptive `User-Agent`;
-- is designed to run **once per login or once a day**, which is a negligible load.
+- is designed to run **once per login, or every few hours to once a day** (`--every`
+  refuses intervals shorter than one hour), which is a negligible load.
 
 The service's responses carry a TDM reservation (`Tdm-Reservation: 1`): the data is
 not meant for text and data mining. Monitoring the status of your own manuscripts is

@@ -137,14 +137,4 @@ def test_context_manager_closes_session(demo_payload: dict) -> None:
     assert closed == [True]
 
 
-@pytest.mark.network
-def test_live_demo_submission() -> None:
-    """Contract test against the real tracker (run with ``pytest -m network``)."""
-    with TrackerClient(timeout=30) as client:
-        payload = client.fetch_json(DEMO_UUID)
-        snapshot = client.fetch(DEMO_UUID)
-    for key in ("ManuscriptTitle", "PubdNumber", "Status", "JournalName", "ReviewSummary"):
-        assert key in payload, f"the tracker no longer returns {key!r}"
-    assert snapshot.title
-    assert snapshot.status
-    assert snapshot.manuscript_number
+# The tests against the real tracker live in test_contract.py (pytest -m network).

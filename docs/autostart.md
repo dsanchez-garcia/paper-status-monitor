@@ -37,10 +37,32 @@ run `paper-status-monitor autostart enable` again. `paper-status-monitor doctor`
 reports this problem.
 ```
 
+(periodic-checks)=
+### Periodic checks while you stay logged in
+
+If your computer stays on, with your session open, for days, also check
+periodically:
+
+```console
+paper-status-monitor autostart enable --every 12h
+```
+
+The program started at login then stays in the background, without a window, and
+checks again every 12 hours (`1d`, `6h`, `1h30m`... are also accepted; the minimum
+is `1h`). It starts with your next login and stops when you log out. The waiting
+time (`--wait`) also applies after the computer wakes up, and a computer that was
+asleep or hibernated catches up with one check shortly after waking up. The
+configuration file is read again before every check, so nothing needs to be
+restarted after you change it. The graphical interface offers the same (*Run → Then
+check again every ... hours*), and `autostart status` shows when the checks run.
+
+On any system, `paper-status-monitor run --every 12h` does the same in a terminal,
+until you press `Ctrl+C`.
+
 ### Alternative: Task Scheduler
 
-If you prefer the Task Scheduler (for example, to also run the check every day at a
-fixed time), create a task from PowerShell:
+If you prefer the Task Scheduler (for example, to check every day at a fixed time
+rather than at an interval), create a task from PowerShell:
 
 ```powershell
 $python = (Get-Command pythonw.exe).Source   # or the full path to your pythonw.exe
@@ -77,6 +99,9 @@ Exec=paper-status-monitor run --wait 300
 Terminal=false
 ```
 
+Add `--every 12h` to the `Exec` line to keep checking every 12 hours while you stay
+logged in (see {ref}`periodic-checks`).
+
 ## macOS
 
 Create `~/Library/LaunchAgents/io.github.paper-status-monitor.plist`:
@@ -102,11 +127,14 @@ Create `~/Library/LaunchAgents/io.github.paper-status-monitor.plist`:
 ```
 
 and load it with `launchctl load ~/Library/LaunchAgents/io.github.paper-status-monitor.plist`.
-Use `which paper-status-monitor` to find the right path.
+Use `which paper-status-monitor` to find the right path. Add `<string>--every</string>`
+and `<string>12h</string>` to `ProgramArguments` to keep checking every 12 hours while
+you stay logged in.
 
 ## How often should it run?
 
-Review statuses change over days or weeks. Checking once per login, or once a day,
-is plenty — and it keeps the load on the tracker negligible. Please do not run the
+Review statuses change over days or weeks. Checking once per login, or every few
+hours to once a day, is plenty — and it keeps the load on the tracker negligible.
+`--every` therefore refuses intervals shorter than one hour; please do not run the
 monitor in a tight loop.
 

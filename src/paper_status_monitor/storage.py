@@ -1,14 +1,19 @@
-"""Excel storage: one workbook per manuscript, one row per observed state.
+"""Excel storage: workbooks that keep one row per observed state of a submission.
 
-A workbook is identified by the *base* manuscript number (without the ``R1``,
-``R2``... revision suffix), so every revision of a manuscript submitted to one
-journal is appended to the same file. The file name also contains the journal and
-the title to make it easy to recognise, e.g.::
+The rows of a submission are identified by its *base* manuscript number (without
+the ``R1``, ``R2``... revision suffix) or by its tracking link, so every revision of
+a manuscript submitted to one journal is part of the same history.
+
+By default every manuscript gets its own workbook whose name starts with that
+number, followed by the journal and the title to make it easy to recognise::
 
     ABC-D-24-00001 - Journal of Examples - A study of something.xlsx
 
-Only the ``"ABC-D-24-00001 - "`` prefix is used to find the file again, so later
-changes in the title do not create new files.
+The name is built from the ``workbook_name`` template (see
+:mod:`paper_status_monitor.naming`) and several submissions may share a workbook,
+for example all the submissions of one paper to different journals. Workbooks are
+found again by their content (see :class:`WorkbookStore`), never by the title, so a
+later change of the title or of the template does not split a history.
 """
 
 from __future__ import annotations
@@ -17,7 +22,8 @@ import logging
 import os
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -30,8 +36,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 from paper_status_monitor.models import (
     COLUMNS,
     DETECTED_AT_COLUMN,
+    MANUSCRIPT_NUMBER_COLUMN,
     NUMERIC_COLUMNS,
     TRACKER_URL_COLUMN,
+    base_manuscript_number,
     cell_to_text,
 )
 
@@ -80,7 +88,7 @@ def sanitize_filename(text: str) -> str:
 
 
 def workbook_name(key: str, journal: str = "", title: str = "") -> str:
-    """Return the file name of a new workbook.
+    """Return the default file name of a new workbook.
 
     Args:
         key: Base manuscript number (or the tracking UUID if it is unknown).
@@ -115,36 +123,29 @@ def _workbook_files(directory: Path) -> Iterator[Path]:
             yield path
 
 
+def is_named_after(path: Path, key: str) -> bool:
+    """Return ``True`` if the file name of *path* starts with *key*.
+
+    That is the case of ``"<key>.xlsx"``, ``"<key> - <anything>.xlsx"`` and
+    sync-client duplicates such as ``"<key> (1).xlsx"`` (the default names).
+    """
+    prefix = sanitize_filename(key).casefold()
+    stem = path.stem.casefold()
+    return bool(prefix) and (stem == prefix or stem.startswith((f"{prefix} - ", f"{prefix} (")))
+
+
 def find_workbook(directory: Path, key: str) -> Path | None:
-    """Return the existing workbook for *key* in *directory*, or ``None``.
+    """Return the existing workbook named after *key* in *directory*, or ``None``.
 
     A workbook matches when its name is ``"<key>.xlsx"``, starts with
     ``"<key> - "`` or is a sync-client duplicate such as ``"<key> (1).xlsx"``.
     If several files match, the most recently modified one is returned and a
     warning is logged.
     """
-    prefix = sanitize_filename(key).casefold()
-    if not prefix:
-        return None
-    matches = [
-        path
-        for path in _workbook_files(directory)
-        if path.stem.casefold() == prefix
-        or path.stem.casefold().startswith((f"{prefix} - ", f"{prefix} ("))
-    ]
+    matches = [path for path in _workbook_files(directory) if is_named_after(path, key)]
     if not matches:
         return None
-    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    if len(matches) > 1:
-        log.warning(
-            "Found %d workbooks for %s; using the most recently modified one (%s). "
-            "Please merge or delete the others: %s",
-            len(matches),
-            key,
-            matches[0].name,
-            ", ".join(p.name for p in matches[1:]),
-        )
-    return matches[0]
+    return _most_recent(matches, key)
 
 
 def find_workbook_by_uuid(directory: Path, uuid: str) -> Path | None:
@@ -159,6 +160,193 @@ def find_workbook_by_uuid(directory: Path, uuid: str) -> Path | None:
         if any(needle in record.get(TRACKER_URL_COLUMN, "").casefold() for record in records):
             return path
     return None
+
+
+def _most_recent(paths: list[Path], key: str) -> Path:
+    paths = sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
+    if len(paths) > 1:
+        log.warning(
+            "Found %d workbooks for %s; using the most recently modified one (%s). "
+            "Please merge or delete the others: %s",
+            len(paths),
+            key,
+            paths[0].name,
+            ", ".join(p.name for p in paths[1:]),
+        )
+    return paths[0]
+
+
+def has_identifier(record: Mapping[str, str]) -> bool:
+    """Return ``True`` if a row has a manuscript number or a tracking link."""
+    return bool(record.get(MANUSCRIPT_NUMBER_COLUMN) or record.get(TRACKER_URL_COLUMN))
+
+
+def belongs_to(record: Mapping[str, str], key: str, uuid: str = "") -> bool:
+    """Return ``True`` if a workbook row was recorded for a given submission.
+
+    Args:
+        record: Workbook row (column label to text, as returned by :func:`read_records`).
+        key: Base manuscript number of the submission (may be empty).
+        uuid: Tracking UUID of the submission (may be empty).
+    """
+    number = record.get(MANUSCRIPT_NUMBER_COLUMN, "")
+    if number and key and base_manuscript_number(number).casefold() == key.casefold():
+        return True
+    url = record.get(TRACKER_URL_COLUMN, "")
+    return bool(uuid and url) and uuid.casefold() in url.casefold()
+
+
+@dataclass(frozen=True)
+class WorkbookLocation:
+    """Where the history of a submission is (or will be) kept.
+
+    Attributes:
+        path: The workbook (it may not exist yet).
+        key: Base manuscript number of the submission (or its UUID if unknown).
+        last_record: Last row recorded for the submission, ``None`` if there is none.
+    """
+
+    path: Path
+    key: str
+    last_record: dict[str, str] | None = None
+
+
+class WorkbookStore:
+    """Find and read the workbooks of a data folder.
+
+    Workbooks are read at most once while they do not change on disk, so looking
+    for several submissions in the same folder stays fast.
+
+    Args:
+        directory: The data folder.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self._cache: dict[Path, tuple[tuple[int, int], list[dict[str, str]]]] = {}
+
+    def workbooks(self) -> list[Path]:
+        """Return the workbooks of the folder (temporary and lock files excluded)."""
+        return sorted(_workbook_files(self.directory))
+
+    def records(self, path: Path) -> list[dict[str, str]]:
+        """Return every data row of a workbook (see :func:`read_records`)."""
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = self._cache.get(path)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        records = read_records(path)
+        self._cache[path] = (signature, records)
+        return records
+
+    def submission_records(self, path: Path, key: str, uuid: str = "") -> list[dict[str, str]]:
+        """Return the rows of *path* that belong to a submission, in file order.
+
+        Rows without any identifier (written by very old versions) are attributed to
+        the submission only when the workbook is named after its key.
+        Unreadable workbooks have no rows.
+        """
+        named = bool(key) and is_named_after(path, key)
+        return [
+            record
+            for record in self._safe_records(path)
+            if belongs_to(record, key, uuid) or (named and not has_identifier(record))
+        ]
+
+    def locate(
+        self, key: str, uuid: str = "", target_name: str = "", *, hint: str | None = None
+    ) -> WorkbookLocation:
+        """Find the workbook that holds the history of a submission.
+
+        The search order is: the workbook given by the naming template
+        (*target_name*), the workbook used last time (*hint*), the workbooks named
+        after *key*, and finally every other workbook. A history is never split: if
+        the rows of the submission are found anywhere, that workbook is used even if
+        its name does not follow the template (``organize`` renames it).
+
+        Args:
+            key: Base manuscript number (or the UUID if the number is unknown).
+            uuid: Tracking UUID.
+            target_name: File name given by the naming template.
+            hint: File name where the submission was found by the previous run.
+
+        Returns:
+            The location; ``last_record`` is ``None`` for a submission that has not
+            been recorded yet, in which case ``path`` is the workbook to create (or
+            to share).
+        """
+        target = self.directory / (target_name or workbook_name(key))
+        named = find_workbook(self.directory, key)
+        candidates: list[Path] = []
+        for path in (target, self.directory / hint if hint else None, named):
+            if path is not None and path not in candidates and path.is_file():
+                candidates.append(path)
+        for path in candidates:
+            rows = self.submission_records(path, key, uuid)
+            if rows:
+                return WorkbookLocation(path, key, rows[-1])
+        found = {
+            path: rows
+            for path in self.workbooks()
+            if path not in candidates and (rows := self.submission_records(path, key, uuid))
+        }
+        if found:
+            path = _most_recent(list(found), key)
+            return WorkbookLocation(path, key, found[path][-1])
+        if named is not None and named != target and not self._safe_records(named):
+            return WorkbookLocation(named, key)  # an empty workbook created for this key
+        return WorkbookLocation(target, key)
+
+    def locate_uuid(self, uuid: str, *, hint: str | None = None) -> WorkbookLocation | None:
+        """Find the history of a submission from its UUID alone (no tracker data).
+
+        Returns:
+            The location in the workbook whose rows mention *uuid* in the
+            ``Tracker URL`` column (the most recently modified one if there are
+            several), or ``None`` if there is none.
+        """
+        paths = self.workbooks()
+        preferred = self.directory / hint if hint else None
+        if preferred in paths:
+            paths.remove(preferred)
+            paths.insert(0, preferred)
+        found: dict[Path, WorkbookLocation] = {}
+        for path in paths:
+            mentions = [
+                record for record in self._safe_records(path) if belongs_to(record, "", uuid)
+            ]
+            if not mentions:
+                continue
+            number = mentions[-1].get(MANUSCRIPT_NUMBER_COLUMN, "")
+            key = base_manuscript_number(number) or uuid
+            rows = self.submission_records(path, key, uuid)
+            found[path] = WorkbookLocation(path, key, rows[-1])
+            if path == preferred:
+                break
+        if not found:
+            return None
+        return found[_most_recent(list(found), uuid)]
+
+    def append(self, path: Path, record: Mapping[str, Any]) -> None:
+        """Append a row (see :func:`append_record`) and forget the cached rows."""
+        self._cache.pop(path, None)
+        append_record(path, record)
+        self._cache.pop(path, None)
+
+    def forget(self, path: Path | None = None) -> None:
+        """Drop the cached rows of *path* (of every workbook if ``None``)."""
+        if path is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(path, None)
+
+    def _safe_records(self, path: Path) -> list[dict[str, str]]:
+        try:
+            return self.records(path)
+        except Exception as exc:  # unreadable or foreign workbook: no rows
+            log.debug("Could not read %s: %s", path.name, exc)
+            return []
 
 
 def _history_sheet(workbook: Workbook) -> Worksheet:
@@ -214,19 +402,96 @@ def append_record(path: Path, record: Mapping[str, Any]) -> None:
     try:
         header = _ensure_header(sheet, [*COLUMNS, *record.keys()])
         row = _last_used_row(sheet) + 1
-        for label, value in record.items():
-            cell = sheet.cell(row=row, column=header.index(label) + 1, value=_to_cell(label, value))
-            if isinstance(value, datetime):
-                cell.number_format = "yyyy-mm-dd hh:mm"
-            elif label == TRACKER_URL_COLUMN and isinstance(value, str) and value:
-                cell.hyperlink = value
-                cell.style = "Hyperlink"
-        last_column = get_column_letter(len(header))
-        sheet.auto_filter.ref = f"A1:{last_column}{row}"
-        sheet.freeze_panes = "A2"
+        _write_row(sheet, row, header, record)
+        _finish_sheet(sheet, header, row)
         _save_atomic(workbook, path)
     finally:
         workbook.close()
+
+
+def merge_workbooks(target: Path, sources: Sequence[Path]) -> int:
+    """Combine the history of several workbooks into *target*.
+
+    The rows of *target* (if it exists) and of every source are merged in
+    chronological order (``Detected at``). The order of the rows of each workbook
+    is kept, and a row without a date stays after the rows that preceded it. Every
+    column is kept. *target* is used as the base when it exists (its other sheets
+    and column widths are preserved); otherwise the first source is. The sources
+    are **not** deleted.
+
+    Returns:
+        The number of data rows written.
+
+    Raises:
+        WorkbookLockedError: If *target* cannot be written.
+    """
+    if not sources:
+        raise ValueError("At least one source workbook is required.")
+    base = target if target.exists() else sources[0]
+    tables = [_read_table(path) for path in sources if path != base]
+    workbook = load_workbook(base)
+    try:
+        sheet = _history_sheet(workbook)
+        tables.insert(0, _sheet_table(sheet))
+        labels = [label for header, _ in tables for label in header]
+        rows = _chronological([rows for _, rows in tables])
+        if sheet.max_row > 1:
+            sheet.delete_rows(2, sheet.max_row - 1)
+        header = _ensure_header(sheet, [*COLUMNS, *labels])
+        for index, record in enumerate(rows, start=2):
+            _write_row(sheet, index, header, record)
+        _finish_sheet(sheet, header, len(rows) + 1)
+        _save_atomic(workbook, target)
+    finally:
+        workbook.close()
+    return len(rows)
+
+
+def _read_table(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
+    workbook = load_workbook(path)
+    try:
+        return _sheet_table(_history_sheet(workbook))
+    finally:
+        workbook.close()
+
+
+def _sheet_table(sheet: Worksheet) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return the header and the data rows (raw cell values) of a sheet."""
+    rows = sheet.iter_rows(values_only=True)
+    first = next(rows, None)
+    header = [cell_to_text(value) for value in first] if first else []
+    records = []
+    for row in rows:
+        if all(value in (None, "") for value in row):
+            continue
+        records.append({label: value for label, value in zip(header, row, strict=False) if label})
+    return [label for label in header if label], records
+
+
+def _chronological(tables: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    keyed = []
+    for table_index, rows in enumerate(tables):
+        latest = datetime.min
+        for row_index, row in enumerate(rows):
+            moment = _as_datetime(row.get(DETECTED_AT_COLUMN))
+            if moment is not None and moment > latest:
+                latest = moment
+            keyed.append(((latest, table_index, row_index), row))
+    keyed.sort(key=lambda item: item[0])
+    return [row for _, row in keyed]
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip()).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
 
 
 def _ensure_header(sheet: Worksheet, labels: list[str]) -> list[str]:
@@ -250,6 +515,22 @@ def _ensure_header(sheet: Worksheet, labels: list[str]) -> list[str]:
         sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.row_dimensions[1].height = 30
     return header
+
+
+def _write_row(sheet: Worksheet, row: int, header: list[str], record: Mapping[str, Any]) -> None:
+    for label, value in record.items():
+        cell = sheet.cell(row=row, column=header.index(label) + 1, value=_to_cell(label, value))
+        if isinstance(value, datetime):
+            cell.number_format = "yyyy-mm-dd hh:mm"
+        elif label == TRACKER_URL_COLUMN and isinstance(value, str) and value:
+            cell.hyperlink = value
+            cell.style = "Hyperlink"
+
+
+def _finish_sheet(sheet: Worksheet, header: list[str], last_row: int) -> None:
+    last_column = get_column_letter(len(header))
+    sheet.auto_filter.ref = f"A1:{last_column}{max(last_row, 1)}"
+    sheet.freeze_panes = "A2"
 
 
 def _last_used_row(sheet: Worksheet) -> int:

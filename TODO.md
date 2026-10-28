@@ -9,29 +9,23 @@ to *Done* (with the version) when it is merged. Keep items small and testable.
       `docs/development.md` → Releasing) and create the GitHub release `v0.1.0`.
 - [ ] **Import the project on Read the Docs** and check that the badge in the README
       turns green.
-- [ ] **Scheduled contract test**: a weekly GitHub Actions job that runs
-      `pytest -m network` against the demo submission and opens an issue if the API
-      format changes.
-- [ ] **Periodic checks while the computer stays on**: an option such as
-      `autostart enable --daily 09:00` (Task Scheduler) or `run --every 12h`, so
-      long uptimes do not skip checks.
-- [ ] **Desktop notifications** as an alternative to opening the text report
-      (Windows toast notifications; `notify-send` on Linux; `osascript` on macOS),
-      selectable with a `notify = "report" | "toast" | "none"` setting.
 
 ## Later (medium priority)
 
-- [ ] `remove`, `enable` and `disable` commands that edit the configuration while
-      preserving comments (e.g. with `tomlkit`).
-- [ ] `summary` command: one table with the latest status of every submission
-      (console, Markdown or HTML).
+- [ ] `edit` command to change the label or the custom fields of a submission in
+      place, keeping the comments (like `remove`, `enable` and `disable`).
 - [ ] Optional e-mail notifications through SMTP. Credentials must come from
       environment variables or the OS keyring, never from files in the repository.
 - [ ] Native autostart for Linux (XDG autostart / systemd user timer) and macOS
-      (LaunchAgent) in `autostart.py`, with tests for the generated files.
+      (LaunchAgent) in `autostart.py`, with tests for the generated files. They can
+      start `run --wait 300 --every 12h` at login, like the Windows shortcut.
 - [ ] Document the meaning of internal status codes (`Status code` column) as they
       are observed, e.g. in `docs/how-it-works.md`.
 - [ ] Optional "Summary" sheet in each workbook with the time spent in each status.
+- [ ] Per-submission `record_*` / `notify_*` overrides (today they apply to every
+      submission).
+- [ ] `organize`: split a workbook whose submissions now map to different names
+      (today it is reported and left untouched).
 
 ## Ideas (low priority)
 
@@ -39,11 +33,26 @@ to *Done* (with the version) when it is merged. Keep items small and testable.
       SuSy...) through a pluggable backend interface (`Backend.fetch(uuid) ->
       Snapshot`).
 - [ ] Export the history to CSV/JSON for people who do not use Excel.
-- [ ] A tiny GUI (system tray icon) showing the last run and the latest statuses.
-- [ ] Localised reports (Spanish, ...).
+- [ ] A system tray icon showing the last run and the latest statuses (the GUI
+      window exists since the unreleased version).
+- [ ] Localised reports and GUI (Spanish, ...).
+- [ ] Buttons in the Windows toast notification (open the workbook, open the
+      tracking page), through protocol activation.
+- [ ] Refuse a second `run --every` loop in the same session (today it only adds
+      requests: the run lock keeps checks from overlapping).
 
 ## Done
 
+- [x] Unreleased — Weekly contract test against the real tracker that opens an issue
+      when the format changes (`contract.yml`); periodic checks while the computer
+      stays on (`run --every`, `autostart enable --every`, GUI); desktop
+      notifications (`notify = "report" | "toast" | "none"` or a list: Windows
+      toasts, `osascript`, `notify-send`); `remove`, `enable` and `disable` commands
+      that keep the comments of the configuration, without new dependencies; a
+      `summary` command (text, Markdown or HTML), also in the window.
+- [x] Unreleased — Independent record/notify choices per column (`record_*`,
+      `notify_*`, `run` overrides), workbook name templates with custom fields,
+      shared workbooks (e.g. one per paper), `organize`, and an English tkinter GUI.
 - [x] 0.1.0 — Rewrite as an installable package: JSON API instead of Selenium, one
       workbook per manuscript and journal (revisions no longer create new files),
       change reports, Windows autostart with readiness wait, `doctor`, strict TOML

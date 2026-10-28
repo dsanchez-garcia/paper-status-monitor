@@ -118,7 +118,7 @@ def config(tmp_path: Path) -> Config:
     return Config(
         data_dir=tmp_path / "data",
         submissions=(SubmissionConfig(uuid=DEMO_UUID, label="Demo"),),
-        open_report=False,
+        notify=(),
     )
 
 

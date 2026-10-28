@@ -42,6 +42,7 @@ installation
 quickstart
 configuration
 cli
+gui
 autostart
 workbooks
 troubleshooting

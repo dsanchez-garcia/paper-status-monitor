@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from paper_status_monitor import report
+from paper_status_monitor import notifications, report
 from paper_status_monitor.client import DEMO_UUID
-from paper_status_monitor.config import SubmissionConfig
+from paper_status_monitor.config import Config, SubmissionConfig
 from paper_status_monitor.models import Change, Snapshot
 from paper_status_monitor.monitor import RunSummary, SubmissionResult
 
@@ -112,3 +112,96 @@ def test_open_path_reports_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.setattr(report.os, "startfile", fail, raising=False)
     monkeypatch.setattr(report.subprocess, "Popen", fail)
     assert report.open_path(tmp_path / "report.txt") is False
+
+
+def test_render_console_tags_changes_that_are_not_notified(snapshot: Snapshot) -> None:
+    quiet = SubmissionResult(
+        SubmissionConfig(DEMO_UUID, label="Quiet"),
+        snapshot=replace(snapshot, title="Quiet paper"),
+        recorded_changes=[Change("Last review activity", "17th May 2022", "18th May 2022")],
+    )
+    mixed = SubmissionResult(
+        SubmissionConfig(DEMO_UUID),
+        snapshot=replace(snapshot, title="Mixed paper"),
+        changes=[Change("Status", "Under Review", "Review Complete")],
+        recorded_changes=[
+            Change("Status", "Under Review", "Review Complete"),
+            Change("Status code", "3", "8"),
+        ],
+    )
+    text = report.render_console(RunSummary(started_at=STARTED, results=[quiet, mixed]))
+    lines = text.splitlines()
+    assert "  [RECORDED]  Quiet paper (not notified)" in lines
+    assert "                - Last review activity: '17th May 2022' → '18th May 2022'" in lines
+    assert "  [CHANGED]   Mixed paper" in lines
+    assert "                - Status: 'Under Review' → 'Review Complete'" in lines
+    assert "                - Status code: '3' → '8' (not notified)" in lines
+    assert not report.should_write_report(RunSummary(started_at=STARTED, results=[quiet]))
+
+
+def test_report_lists_custom_fields(snapshot: Snapshot) -> None:
+    result = SubmissionResult(
+        SubmissionConfig(DEMO_UUID, fields={"paper": "TMY", "funding_agency": "X"}),
+        snapshot=snapshot,
+        changes=[Change("Status", "Under Review", "Review Complete")],
+    )
+    text = report.render_report(RunSummary(started_at=STARTED, results=[result]))
+    assert "  Paper: TMY" in text
+    assert "  Funding agency: X" in text
+
+
+def test_publish_report(
+    tmp_path: Path, snapshot: Snapshot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[Path] = []
+    monkeypatch.setattr(report, "open_path", opened.append)
+    config = Config(data_dir=tmp_path / "data")
+    summary = make_summary(snapshot)
+
+    path = report.publish_report(summary, config)  # notify = "report" by default
+
+    assert path is not None
+    assert path.parent == config.reports_dir
+    assert summary.report_path == path
+    assert opened == [path]
+    assert report.publish_report(RunSummary(started_at=STARTED), config) is None
+    only_errors = RunSummary(started_at=STARTED, results=[summary.results[2]])
+    quiet_config = replace(config, notify_on_errors=False)
+    assert report.publish_report(only_errors, quiet_config, channels=[]) is None
+
+
+def test_publish_report_can_show_a_desktop_notification(
+    tmp_path: Path, snapshot: Snapshot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[Path] = []
+    shown: list[notifications.Notification] = []
+    monkeypatch.setattr(report, "open_path", opened.append)
+    monkeypatch.setattr(notifications, "show", shown.append)
+    config = Config(data_dir=tmp_path / "data", notify=("toast",))
+
+    path = report.publish_report(make_summary(snapshot), config)
+
+    assert path is not None
+    assert path.is_file()  # the report is always written
+    assert opened == []
+    assert [item.target for item in shown] == [path]
+    assert shown[0].title == "Paper status: 1 changed, 1 new, 1 failed"
+
+    report.publish_report(make_summary(snapshot), config, channels=["report", "toast"])
+    assert len(opened) == 1
+    assert len(shown) == 2
+
+
+def test_publish_report_survives_write_errors(
+    tmp_path: Path, snapshot: Snapshot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*args: object, **kwargs: object) -> Path:
+        raise OSError("read-only folder")
+
+    shown: list[notifications.Notification] = []
+    monkeypatch.setattr(report, "write_report", fail)
+    monkeypatch.setattr(notifications, "show", shown.append)
+    config = Config(data_dir=tmp_path, notify=("report", "toast"))
+    assert report.publish_report(make_summary(snapshot), config) is None
+    assert len(shown) == 1  # the news still reach the user
+    assert shown[0].target is None

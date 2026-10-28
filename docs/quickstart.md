@@ -76,8 +76,16 @@ paper-status-monitor autostart enable
 ```
 
 From now on, the monitor runs in the background (without a console window) every
-time you log in, and the report opens in your text editor when there is news. See
-{doc}`autostart` for details and for Linux/macOS.
+time you log in, and the report opens in your text editor when there is news. If
+your computer stays on for days, use `autostart enable --every 12h` to also check
+every 12 hours while you stay logged in. See {doc}`autostart` for details and for
+Linux/macOS.
+
+```{tip}
+Prefer a desktop notification to the report opening by itself? Set
+`notify = "toast"` (or `["report", "toast"]` for both) in the configuration file,
+or tick *Show a desktop notification* in the graphical interface.
+```
 
 ## 6. Make sure everything is fine
 
@@ -86,5 +94,16 @@ paper-status-monitor doctor
 ```
 
 `doctor` checks the configuration, the data folder, the connection to the tracker,
-the autostart shortcut and the result of the last run.
+the autostart shortcut and the result of the last run. To see the latest status of
+all your submissions at a glance, use `paper-status-monitor summary`.
+
+## Prefer a window?
+
+Every step above can also be done in the graphical interface:
+
+```console
+paper-status-monitor gui
+```
+
+See {doc}`gui`.
 

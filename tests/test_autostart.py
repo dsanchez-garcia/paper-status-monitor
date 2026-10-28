@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from paper_status_monitor import autostart
+from paper_status_monitor import _powershell, autostart
 
 
 @pytest.fixture
@@ -102,6 +103,45 @@ def test_run_powershell_reports_failures(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(autostart.subprocess, "run", fake_run)
     with pytest.raises(autostart.AutostartError, match="Access denied"):
         autostart._run_powershell("exit 1", {})
+
+
+def test_powershell_timeouts_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired("powershell.exe", 5)
+
+    monkeypatch.setattr(_powershell.subprocess, "run", fake_run)
+    with pytest.raises(_powershell.PowerShellError, match="did not finish within 5 seconds"):
+        _powershell.run_script("Start-Sleep 10", timeout=5)
+
+
+def test_launcher_arguments_with_periodic_checks() -> None:
+    arguments = autostart.launcher_arguments(60, every=timedelta(hours=12))
+    assert arguments[-4:] == ["--wait", "60", "--every", "12h"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ("-m paper_status_monitor run --wait 300", (300, None)),
+        ("-m paper_status_monitor run --wait 120 --every 1d12h", (120, timedelta(hours=36))),
+        (
+            '-m paper_status_monitor --config "C:\\my config.toml" run --every 2h',
+            (None, timedelta(hours=2)),
+        ),
+        ("-m paper_status_monitor run --wait soon --every never", (None, None)),
+        ("", (None, None)),
+    ],
+)
+def test_parse_launcher_arguments(arguments: str, expected: tuple) -> None:
+    assert autostart.parse_launcher_arguments(arguments) == expected
+
+
+def test_enable_with_periodic_checks(windows: list, tmp_path: Path) -> None:
+    autostart.enable(wait=30, every=timedelta(hours=6))
+    _, variables = windows[0]
+    assert variables["PSM_ARGS"].endswith("run --wait 30 --every 6h")
+    info = autostart.ShortcutInfo(Path("x.lnk"), "", variables["PSM_ARGS"], "")
+    assert (info.wait, info.every) == (30, timedelta(hours=6))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="needs Windows PowerShell")

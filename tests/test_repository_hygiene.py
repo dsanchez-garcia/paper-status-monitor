@@ -25,7 +25,13 @@ ALLOWED_UUIDS = {
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 FORBIDDEN_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".csv", ".lnk", ".bat"}
-FORBIDDEN_NAMES = {"config.toml", "state.json", "run.lock"}
+FORBIDDEN_NAMES = {
+    "config.toml",
+    "config.toml.bak",
+    "state.json",
+    "run.lock",
+    ".paper-status-monitor.json",  # last state seen of every submission (contains UUIDs)
+}
 
 
 def tracked_files() -> list[Path]:
