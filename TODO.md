@@ -5,8 +5,7 @@ to *Done* (with the version) when it is merged. Keep items small and testable.
 
 ## Next (high priority)
 
-- [ ] **Import the project on Read the Docs** and check that the badge in the README
-      turns green.
+Nothing pending: pick an item below.
 
 ## Later (medium priority)
 
@@ -33,7 +32,8 @@ to *Done* (with the version) when it is merged. Keep items small and testable.
 ## Done
 
 - [x] 0.2.0 — published on PyPI (`pip install paper-status-monitor`) and as the
-      GitHub release `v0.2.0`, through trusted publishing.
+      GitHub release `v0.2.0`, through trusted publishing; documentation published on
+      Read the Docs (<https://paper-status-monitor.readthedocs.io>).
 - [x] 0.2.0 — icon in the notification area while the periodic checks run
       (`run --every --tray`, `autostart enable --tray`, tick box in the window), with
       the latest statuses and a menu (check now, open the window, the report or the
