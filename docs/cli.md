@@ -331,7 +331,7 @@ used instead of the keyring.
 Diagnose the installation and print one line per check:
 
 ```text
-[INFO] paper-status-monitor 0.1.0, Python 3.13.1
+[INFO] paper-status-monitor 0.2.0, Python 3.13.1
 [ OK ] Configuration: C:\Users\me\AppData\Roaming\paper-status-monitor\config.toml (2 enabled submission(s))
 [INFO] Changes recorded: all columns
 [INFO] Changes notified: all columns except Last review activity

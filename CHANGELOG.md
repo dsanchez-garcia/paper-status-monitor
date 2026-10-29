@@ -7,6 +7,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+The first version published on PyPI.
+
 ### Added
 
 - Choose independently which changes are **recorded** (add a row to the workbook)
@@ -186,6 +190,7 @@ as an installable, documented and tested package.
 
 - Dependencies on Selenium, webdriver-manager, pandas and Tkinter.
 
-[Unreleased]: https://github.com/dsanchez-garcia/paper-status-monitor/compare/b3549f1ab4f7a05d41457277c829f113c67e163d...HEAD
+[Unreleased]: https://github.com/dsanchez-garcia/paper-status-monitor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dsanchez-garcia/paper-status-monitor/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dsanchez-garcia/paper-status-monitor/tree/b3549f1ab4f7a05d41457277c829f113c67e163d
 
