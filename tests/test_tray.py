@@ -234,7 +234,7 @@ def test_tray_icon_failures_are_only_logged(
     events = {"wake": threading.Event(), "stop": threading.Event()}
     assert TrayIcon(**events, backend=Broken).start() is False
     assert "no taskbar" in caplog.text
-    monkeypatch.setattr(tray.sys, "platform", "linux")
+    monkeypatch.setattr(tray, "is_supported", lambda: False)
     assert TrayIcon(**events).start() is False
     assert "only available on Windows" in caplog.text
 

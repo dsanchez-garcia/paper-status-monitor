@@ -255,6 +255,14 @@ def configured(tmp_path: Path, **fields: str) -> Path:
     return path
 
 
+def cascade_labels(app: Any) -> list[str]:
+    """The menus of the menu bar (Tk 8.6 adds a tear-off entry first, Tk 9 does not)."""
+    menu = app._menu
+    last = menu.index("end")
+    entries = range(last + 1) if last is not None else range(0)
+    return [menu.entrycget(index, "label") for index in entries if menu.type(index) == "cascade"]
+
+
 def test_configured_language(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     assert gui.configured_language(path) == "en"  # no file yet
@@ -281,10 +289,10 @@ def test_window_in_spanish(make_app, tmp_path: Path) -> None:
     app.template_var.set("{journal}")
     app.write_output("previous output\n")
     app.notebook.select(2)
+    assert cascade_labels(app) == ["Archivo", "Ayuda"]
     app.language_var.set("English")  # rebuilds the window in English
     assert app.notebook.tab(0, "text") == "Submissions"
-    assert app._menu is not None
-    assert app._menu.entrycget(1, "label") == "File"
+    assert cascade_labels(app) == ["File", "Help"]
     assert app.notebook.index("current") == 2
     assert app.output.get("1.0", "end-1c") == "previous output\n"
     assert app.template_var.get() == "{journal}"

@@ -758,7 +758,7 @@ class FakeTrayBackend:
 def test_run_tray_needs_periodic_checks_on_windows(config_file: Path, monkeypatch, capsys) -> None:
     assert cli.main(["-c", str(config_file), "run", "--tray"]) == cli.EXIT_USAGE
     assert "--tray shows an icon while the periodic checks run" in capsys.readouterr().err
-    monkeypatch.setattr(cli.tray.sys, "platform", "linux")
+    monkeypatch.setattr(cli.tray, "is_supported", lambda: False)  # not Windows
     args = ["-c", str(config_file), "run", "--every", "12h", "--tray"]
     assert cli.main(args) == cli.EXIT_USAGE
     assert "only available on Windows" in capsys.readouterr().err
@@ -769,7 +769,9 @@ def test_run_every_with_a_tray_icon(
 ) -> None:
     import functools
 
-    monkeypatch.setattr(cli.tray.sys, "platform", "win32")
+    # Only the icon is supposed to be supported: sys.platform must stay as it is,
+    # because the locks depend on it.
+    monkeypatch.setattr(cli.tray, "is_supported", lambda: True)
     FakeTrayBackend.instances = []
     monkeypatch.setattr(
         cli.tray, "TrayIcon", functools.partial(cli.tray.TrayIcon, backend=FakeTrayBackend)
@@ -800,7 +802,7 @@ def test_run_every_with_a_tray_icon(
 def test_autostart_enable_with_a_tray_icon(monkeypatch, config_file: Path, capsys) -> None:
     created: list[dict] = []
     monkeypatch.setattr(cli.autostart, "is_supported", lambda: True)
-    monkeypatch.setattr(cli.tray.sys, "platform", "win32")
+    monkeypatch.setattr(cli.tray, "is_supported", lambda: True)
     monkeypatch.setattr(
         cli.autostart, "enable", lambda **kwargs: created.append(kwargs) or Path("startup.lnk")
     )
