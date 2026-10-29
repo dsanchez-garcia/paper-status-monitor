@@ -56,12 +56,93 @@ Because the page collapses many internal codes into *Review Complete*, the raw
 that something happened behind the scenes (for example, the editor started working
 on a decision). Add `"Status code"` to `notify_ignore` if you do not want to be
 notified about those changes (they are still recorded), or to `record_ignore` if you
-do not want them to add rows either.
+do not want them to add rows either. What the codes and labels mean in practice is
+described in {ref}`observed-statuses`.
 
-```{note}
-The meaning of the internal codes is not documented. Contributions that map codes to
-editorial stages, based on your own observations, are welcome.
-```
+(observed-statuses)=
+## Statuses observed in practice
+
+The internal codes are not documented: their meaning can only be learnt by watching
+real submissions. This section gathers what has been observed so far, anonymised (no
+manuscript numbers, titles, journals, authors or dates). Reviewer counts are written
+*completed / accepted / sent*, as in the report.
+
+### Codes
+
+| Code | Label shown | Observed |
+| --- | --- | --- |
+| 3 | *Under Review* | An original submission with reviewers invited, one of them accepted and no review completed yet (`0 / 1 / 2+`). |
+| 4 | *Required Reviews Complete* | Not recorded yet. It is the only code shown with this label, which appeared when the second review was completed (see below). |
+| 23 | *Under Review* | Not recorded yet. Whether revisions under review use 3 or 23 is still unknown. |
+| Any other | *Review Complete* | Not recorded yet. The label appeared in different situations (see below), which may well correspond to different codes. |
+
+### Two submissions, two rounds each
+
+These two submissions were followed through the original submission and a first
+revision before the `Status code` column existed, so only the labels and the counts
+are known. Every row is a state seen by the monitor; changes of *Last review
+activity* alone are left out, and a state that lasted less than the time between two
+checks may be missing.
+
+Submission A:
+
+| Revision | Status | Counts | Notes |
+| --- | --- | --- | --- |
+| 0 | *Under Review* | `0 / 0 / 2+` | |
+| 0 | *Under Review* | `1 / 1 / 2+` | |
+| 0 | *Under Review* | `1 / 2 / 2+` | |
+| 0 | *Required Reviews Complete* | `2 / 2 / 2+` | When the second review was completed. |
+| 0 | *Review Complete* | `2 / 2 / 2+` | The next day, without a new *Last review activity*. |
+| 1 | *Review Complete* | `0 / 0 / 0` | First state of the revision: counts back to zero, *Last review activity* still from the previous round. |
+| 1 | *Under Review* | `0 / 0 / 2` | Reviewers invited. |
+| 1 | *Under Review* | `1 / 1 / 2` | One day after the invitations. |
+| 1 | *Required Reviews Complete* | `2 / 2 / 2` | About a week later. |
+| 1 | *Review Complete* | `2 / 2 / 2` | Within four days, without a new *Last review activity*. |
+
+Submission B:
+
+| Revision | Status | Counts | Notes |
+| --- | --- | --- | --- |
+| 0 | *Under Review* | `0 / 0 / 2+` | |
+| 0 | *Under Review* | `0 / 1 / 2+` | |
+| 0 | *Under Review* | `0 / 2 / 2+` | |
+| 0 | *Under Review* | `1 / 2 / 2+` | For months, while *Last review activity* changed every one to four weeks. |
+| 0 | *Review Complete* | `1 / 2 / 2+` | Straight from *Under Review*, with one accepted review missing and without a new *Last review activity*. |
+| 1 | *Review Complete* | `0 / 0 / 0` | First state of the revision, as in submission A. |
+| 1 | *Under Review* | `0 / 0 / 1` | One reviewer invited. |
+| 1 | *Under Review* | `0 / 1 / 1` | |
+| 1 | *Under Review* | `0 / 0 / 1` | The accepted invitation was no longer counted... |
+| 1 | *Under Review* | `0 / 1 / 1` | ...and was counted again later. |
+| 1 | *Review Complete* | `1 / 1 / 1` | When the only review was completed. |
+
+### What this tells you
+
+- *Review Complete* does not always mean that the reviews are complete: the page
+  shows it for every code other than 3, 4 and 23. It appeared when the editor moved
+  on after the reviews, but also as soon as a revision reached the tracker, with all
+  the counts at zero, until reviewers were invited.
+- *Required Reviews Complete* appeared when the reviews the editor needed (two, in
+  submission A) were completed, and *Review Complete* followed within days. The
+  editor may also move on before every accepted reviewer has reported: in the first
+  round of submission B, *Required Reviews Complete* was not seen.
+- *Last review activity* follows the reviewers: the step to *Review Complete* did not
+  change it unless a review was completed at the same time, and it often changed
+  with no other visible change (perhaps new invitations hidden behind `2+`, or
+  reminders).
+- The counts start again from zero with every revision, and they can go down.
+- `2+` was shown from the start of both first rounds, but exact numbers (`1`, `2`) in
+  the revision rounds: `2+` seems to mean *more than two* invitations.
+- Both submissions answered HTTP 404 when they were checked again, months after
+  their last change.
+
+### Share your observations
+
+The table of codes fills in as codes are recorded. If you see a code that is not
+described here, or a different sequence, please
+[open an issue](https://github.com/dsanchez-garcia/paper-status-monitor/issues) with
+the `Revision`, `Status`, `Status code` and reviewer counts of each row, and roughly
+how long each state lasted. Remove the title, manuscript number, journal, authors,
+dates and tracking link first.
 
 ## A run, step by step
 

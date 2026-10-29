@@ -58,6 +58,12 @@ change between minor versions until 1.0.
 .. automodule:: paper_status_monitor.storage
 ```
 
+## Time in each status
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.timeline
+```
+
 ## Organizing workbooks
 
 ```{eval-rst}
@@ -76,16 +82,40 @@ change between minor versions until 1.0.
 .. automodule:: paper_status_monitor.notifications
 ```
 
+## E-mail notifications
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.emails
+```
+
 ## Periodic checks
 
 ```{eval-rst}
 .. automodule:: paper_status_monitor.scheduling
 ```
 
+## Icon in the notification area
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.tray
+```
+
+## Translations
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.i18n
+```
+
 ## Summary table
 
 ```{eval-rst}
 .. automodule:: paper_status_monitor.summary
+```
+
+## Exporting the history
+
+```{eval-rst}
+.. automodule:: paper_status_monitor.export
 ```
 
 ## Run state
@@ -100,7 +130,7 @@ change between minor versions until 1.0.
 .. automodule:: paper_status_monitor.gui
 ```
 
-## Autostart (Windows)
+## Autostart
 
 ```{eval-rst}
 .. automodule:: paper_status_monitor.autostart

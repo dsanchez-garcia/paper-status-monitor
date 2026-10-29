@@ -37,25 +37,31 @@ CHANGES (1)
 - **No browser needed** – reads the same JSON data as the official tracking page
   (no Selenium, ChromeDriver or Chrome).
 - **Excel history of every submission** – every revision (R1, R2, …) is appended to
-  the same workbook, with a `Detected at` timestamp for every change.
+  the same workbook, with a `Detected at` timestamp for every change, and an optional
+  *Time in status* sheet adds up how long each submission spent in each status.
 - **Your workbook names** – build them from placeholders such as `{paper}`,
-  `{journal}` or `{manuscript_number}`, add your own fields (e.g. `paper = "TMY"`) to
+  `{journal}` or `{manuscript_number}`, add your own fields (e.g. `paper = "Tau"`) to
   sort them by paper, or keep **all the submissions of a paper to different
   journals in one workbook** with `workbook_name = "{paper}"`.
 - **You choose what matters** – decide, column by column, which changes are recorded
   in the workbook and which are reported: for example, record a new *Last review
   activity* date without being notified, or be notified only when the *Status*
   changes.
-- **Change reports and desktop notifications** – a plain-text report is written
-  only when something you care about changes, a new submission is tracked or a check
-  fails; it can be opened for you, announced with a desktop notification (Windows,
-  macOS, Linux), or both.
+- **Change reports, desktop notifications and e-mails** – a plain-text report is
+  written only when something you care about changes, a new submission is tracked or
+  a check fails; it can be opened for you, announced with a desktop notification
+  (Windows, macOS, Linux), sent by e-mail through your SMTP server, or any of these.
 - **Command line or window** – `paper-status-monitor gui` opens a graphical
   interface to manage submissions, notifications, workbook names and runs.
-- **Runs at login on Windows** – `paper-status-monitor autostart enable` adds a
-  windowless launcher to your Startup folder; it waits for the network and for cloud
+- **English or Spanish** – `language = "es"` writes the reports, notifications,
+  e-mails and summary, and shows the window, in Spanish; the workbooks keep the
+  same columns in every language.
+- **Runs at login** – `paper-status-monitor autostart enable` adds a windowless
+  launcher that runs at every login (a Startup shortcut on Windows, an XDG autostart
+  entry on Linux, a launchd agent on macOS); it waits for the network and for cloud
   drives such as Google Drive or OneDrive to be ready, and with `--every 12h` it keeps
-  checking while you stay logged in.
+  checking while you stay logged in (on Windows, `--tray` adds an icon with the
+  latest statuses to the notification area).
 - **Robust** – retries on network errors, atomic workbook writes, a lock against
   concurrent runs, a rotating log file and a `doctor` command to diagnose problems.
 - **Detects the end of tracking** – when the tracker stops returning data for a
@@ -67,9 +73,9 @@ CHANGES (1)
 pip install paper-status-monitor
 
 paper-status-monitor init --data-dir "C:\Users\me\Documents\Paper status"
-paper-status-monitor add "https://track.authorhub.elsevier.com/?uuid=<your-uuid>" --label "My paper" --field paper=TMY
+paper-status-monitor add "https://track.authorhub.elsevier.com/?uuid=<your-uuid>" --label "My paper" --field paper=Tau
 paper-status-monitor run
-paper-status-monitor autostart enable      # Windows: check at every login
+paper-status-monitor autostart enable      # check at every login
 paper-status-monitor gui                   # optional: do all of this from a window
 ```
 
@@ -93,19 +99,21 @@ notify = ["report", "toast"]                                  # open it and noti
 | --- | --- |
 | `init` | Create a commented configuration file. |
 | `add LINK` | Add a submission (tracking link or UUID), with optional custom fields. |
+| `edit` | Change the label or the custom fields of a submission (the comments of the configuration are kept). |
 | `remove`, `disable`, `enable` | Remove, pause or resume a submission (the comments of the configuration are kept). |
 | `list` | Show the configured submissions and their last recorded status. |
 | `summary` | One table with the latest status of every submission (text, Markdown or HTML). |
+| `export` | The whole recorded history as CSV or JSON, for other tools than Excel. |
 | `check LINK` | Show the current status of one submission without saving anything. |
-| `run` | Check every submission (once, or periodically with `--every 12h`), update the workbooks and report the news. |
-| `organize` | Rename or merge existing workbooks to follow the naming template. |
+| `run` | Check every submission (once, or periodically with `--every 12h`, optionally with an icon in the notification area: `--tray`), update the workbooks and report the news. |
+| `organize` | Rename, merge or split existing workbooks to follow the naming template. |
 | `gui` | Open the graphical interface (also `paper-status-monitor-gui`). |
-| `autostart enable/disable/status` | Run automatically at login, and optionally every few hours (Windows). |
+| `autostart enable/disable/status` | Run automatically at login (Windows, Linux, macOS), and optionally every few hours. |
+| `email test/set-password` | Send a test e-mail; keep the SMTP password in the system keyring (never in the configuration). |
 | `doctor` | Diagnose configuration, connectivity and autostart problems. |
 
 See the [documentation](https://paper-status-monitor.readthedocs.io) for the
-configuration reference, the workbook format, autostart on Linux and macOS, and
-troubleshooting.
+configuration reference, the workbook format, running at login and troubleshooting.
 
 ## Privacy and responsible use
 

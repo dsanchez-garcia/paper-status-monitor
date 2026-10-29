@@ -7,7 +7,7 @@ The ``workbook_name`` setting is a template such as::
 Every ``{placeholder}`` is replaced with a value of the submission: the built-in
 placeholders listed in :data:`PLACEHOLDERS` come from the tracker, and any other
 name refers to a *custom field* declared in the configuration (for instance
-``fields = { paper = "TMY" }``). Placeholders accept the usual Python format
+``fields = { paper = "Tau" }``). Placeholders accept the usual Python format
 specification, so ``{title:.40}`` keeps the first 40 characters of the title.
 
 Submissions whose names coincide share a workbook. A template without
@@ -165,7 +165,7 @@ def validate_template(template: str, custom_fields: Iterable[str] = ()) -> None:
         raise ValueError(
             f"Unknown placeholder(s) {listed}. Built-in placeholders: {builtin}. Custom "
             f"fields declared in the submissions: {declared}. To use a custom field, add "
-            "it to the 'fields' of a submission, e.g. fields = { paper = \"TMY\" }."
+            "it to the 'fields' of a submission, e.g. fields = { paper = \"Tau\" }."
         )
     try:
         render_stem(template, dict.fromkeys(known, "Sample"))

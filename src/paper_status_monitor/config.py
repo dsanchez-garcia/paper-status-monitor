@@ -17,8 +17,9 @@ Which changes are *recorded* (add a row to the workbook) and which are *notified
 ``record_ignore`` and ``notify_fields`` / ``notify_ignore``; ``notify`` chooses how
 you are told about the news (open the report, a desktop notification, or nothing).
 
-:func:`add_submission`, :func:`remove_submission` and :func:`set_submission_enabled`
-edit the file in place and keep its comments; :func:`save_config` rewrites it.
+:func:`add_submission`, :func:`remove_submission`, :func:`set_submission_enabled` and
+:func:`edit_submission` edit the file in place and keep its comments;
+:func:`save_config` rewrites it.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import shutil
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +40,9 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised only on Python 3.10
     import tomli as tomllib
 
-from paper_status_monitor import naming, paths
+from paper_status_monitor import i18n, naming, paths
 from paper_status_monitor.client import DEMO_UUID, parse_uuid, tracker_url
+from paper_status_monitor.i18n import _, column_label
 from paper_status_monitor.models import TRACKED_COLUMNS, clean_text
 
 #: Documentation page describing every setting.
@@ -49,8 +52,15 @@ DOCS_URL = "https://paper-status-monitor.readthedocs.io/en/latest/configuration.
 DEFAULT_WORKBOOK_NAME = naming.DEFAULT_WORKBOOK_NAME
 
 #: Ways of telling the user about news (values of the ``notify`` setting):
-#: ``"report"`` opens the text report, ``"toast"`` shows a desktop notification.
-NOTIFY_CHANNELS: tuple[str, ...] = ("report", "toast")
+#: ``"report"`` opens the text report, ``"toast"`` shows a desktop notification and
+#: ``"email"`` sends the report by e-mail (see :class:`EmailConfig`).
+NOTIFY_CHANNELS: tuple[str, ...] = ("report", "toast", "email")
+
+#: Security of the connection to the SMTP server, and the usual port of each one.
+EMAIL_SECURITY_PORTS: dict[str, int] = {"starttls": 587, "ssl": 465, "none": 25}
+
+#: Environment variable that holds the password of the SMTP server.
+SMTP_PASSWORD_ENV_VAR = "PAPER_STATUS_MONITOR_SMTP_PASSWORD"
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -65,10 +75,22 @@ _TOP_LEVEL_KEYS = frozenset(
         "open_report",
         "notify_on_errors",
         "request_timeout",
+        "time_in_status",
+        "language",
+        "email",
         "submissions",
     }
 )
-_SUBMISSION_KEYS = frozenset({"url", "uuid", "label", "enabled", "fields"})
+#: General settings that a submission can override with keys of the same name in its
+#: ``[[submissions]]`` table (see :attr:`SubmissionConfig.overrides`).
+SUBMISSION_OVERRIDES: tuple[str, ...] = (
+    "record_fields",
+    "record_ignore",
+    "notify_fields",
+    "notify_ignore",
+)
+
+_SUBMISSION_KEYS = frozenset({"url", "uuid", "label", "enabled", "fields", *SUBMISSION_OVERRIDES})
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
@@ -84,15 +106,20 @@ class SubmissionConfig:
         uuid: Tracking UUID taken from the "Track your submission" link.
         label: Optional short name shown in reports and listings.
         enabled: ``False`` pauses monitoring without removing the entry.
-        fields: Custom fields (name to text), e.g. ``{"paper": "TMY"}``. They can be
+        fields: Custom fields (name to text), e.g. ``{"paper": "Tau"}``. They can be
             used as placeholders in ``workbook_name`` and are written to extra
             columns of the workbook.
+        overrides: The submission's own ``record_fields``, ``record_ignore``,
+            ``notify_fields`` or ``notify_ignore`` (see :data:`SUBMISSION_OVERRIDES`).
+            Each one replaces the general setting of the same name for this
+            submission; ``None`` means every column.
     """
 
     uuid: str
     label: str = ""
     enabled: bool = True
     fields: Mapping[str, str] = field(default_factory=dict, hash=False)
+    overrides: Mapping[str, tuple[str, ...] | None] = field(default_factory=dict, hash=False)
 
     @property
     def tracker_url(self) -> str:
@@ -103,6 +130,48 @@ class SubmissionConfig:
     def display_name(self) -> str:
         """The label if there is one, otherwise the UUID."""
         return self.label or self.uuid
+
+
+@dataclass(frozen=True)
+class EmailConfig:
+    """How e-mails are sent when ``notify`` includes ``"email"`` (``[email]`` table).
+
+    The password is never stored in the configuration: it is read from the
+    :data:`SMTP_PASSWORD_ENV_VAR` environment variable or from the system keyring
+    (see :mod:`~paper_status_monitor.emails`).
+
+    Attributes:
+        smtp_host: Name of the SMTP server, e.g. ``"smtp.example.org"``.
+        smtp_port: Port of the server; ``None`` uses the usual port of *security*.
+        security: ``"starttls"`` (default), ``"ssl"`` or ``"none"``.
+        username: Login name on the server (``""``: no login).
+        sender: ``From`` address; defaults to *username*.
+        to: Recipients.
+    """
+
+    smtp_host: str = ""
+    smtp_port: int | None = None
+    security: str = "starttls"
+    username: str = ""
+    sender: str = ""
+    to: tuple[str, ...] = ()
+
+    @property
+    def port(self) -> int:
+        """The port used: :attr:`smtp_port`, or the usual port of :attr:`security`."""
+        return self.smtp_port or EMAIL_SECURITY_PORTS.get(self.security, 587)
+
+    @property
+    def from_address(self) -> str:
+        """The ``From`` address: :attr:`sender`, else :attr:`username`."""
+        return self.sender or self.username
+
+    @property
+    def missing(self) -> tuple[str, ...]:
+        """Settings still needed to send e-mails (empty when complete)."""
+        sender = self.from_address if "@" in self.from_address else ""
+        needed = (("smtp_host", self.smtp_host), ("to", self.to), ("sender", sender))
+        return tuple(name for name, value in needed if not value)
 
 
 @dataclass(frozen=True)
@@ -124,6 +193,13 @@ class Config:
         notify: How the user is told about news, a subset of :data:`NOTIFY_CHANNELS`:
             ``"report"`` opens the report, ``"toast"`` shows a desktop notification.
             The report is written in every case.
+        time_in_status: Add a *Time in status* sheet to every workbook, with how long
+            each submission spent in each status (see
+            :func:`~paper_status_monitor.storage.write_time_sheet`).
+        email: How e-mails are sent (``[email]`` table), used when :attr:`notify`
+            includes ``"email"``.
+        language: Language of the reports, notifications, e-mails, summary and
+            window, a code of :data:`~paper_status_monitor.i18n.LANGUAGES`.
     """
 
     data_dir: Path
@@ -138,6 +214,9 @@ class Config:
     record_fields: tuple[str, ...] | None = None
     record_ignore: tuple[str, ...] = ()
     notify: tuple[str, ...] = ("report",)
+    time_in_status: bool = False
+    email: EmailConfig = field(default_factory=EmailConfig)
+    language: str = i18n.DEFAULT_LANGUAGE
 
     @property
     def open_report(self) -> bool:
@@ -156,13 +235,25 @@ class Config:
 
     @property
     def notified_columns(self) -> tuple[str, ...]:
-        """Columns whose changes are reported, in workbook order."""
+        """Columns whose changes are reported, in workbook order (general settings)."""
         return select_columns(self.notify_fields, (*self.notify_ignore, *self.ignore_fields))
 
     @property
     def recorded_columns(self) -> tuple[str, ...]:
-        """Columns whose changes add a row to the workbook, in workbook order."""
+        """Columns whose changes add a row to the workbook, in workbook order (general settings)."""
         return select_columns(self.record_fields, self.record_ignore)
+
+    def notified_columns_for(self, submission: SubmissionConfig) -> tuple[str, ...]:
+        """Columns whose changes are reported for *submission*, with its own settings."""
+        own = submission.overrides
+        ignore = own.get("notify_ignore", (*self.notify_ignore, *self.ignore_fields))
+        return select_columns(own.get("notify_fields", self.notify_fields), ignore or ())
+
+    def recorded_columns_for(self, submission: SubmissionConfig) -> tuple[str, ...]:
+        """Columns whose changes add a row for *submission*, with its own settings."""
+        own = submission.overrides
+        ignore = own.get("record_ignore", self.record_ignore)
+        return select_columns(own.get("record_fields", self.record_fields), ignore or ())
 
     @property
     def custom_field_names(self) -> tuple[str, ...]:
@@ -204,11 +295,22 @@ def split_columns(selected: Iterable[str]) -> tuple[tuple[str, ...] | None, tupl
 
 
 def describe_columns(selected: Iterable[str]) -> str:
-    """Describe a choice of columns, e.g. ``"all columns except Status code"``."""
+    """Describe a choice of columns, e.g. ``"all columns except Status code"``.
+
+    The text is in the current language (see :mod:`~paper_status_monitor.i18n`).
+    """
     fields, ignore = split_columns(selected)
     if fields is None:
-        return "all columns except " + ", ".join(ignore) if ignore else "all columns"
-    return "only " + ", ".join(fields) if fields else "no columns"
+        if not ignore:
+            return _("all columns")
+        return _("all columns except {columns}").format(columns=_column_list(ignore))
+    if not fields:
+        return _("no columns")
+    return _("only {columns}").format(columns=_column_list(fields))
+
+
+def _column_list(columns: Iterable[str]) -> str:
+    return ", ".join(column_label(column) for column in columns)
 
 
 def canonical_columns(
@@ -258,7 +360,7 @@ def parse_columns_option(
 def parse_notify(value: Any, *, setting: str = "notify", where: str = "") -> tuple[str, ...]:
     """Parse the ways of telling the user about news.
 
-    Accepted values are a channel name (``"report"`` or ``"toast"``), a
+    Accepted values are a channel name (``"report"``, ``"toast"`` or ``"email"``), a
     comma-separated text or a list of names, and ``"none"`` (or an empty list) for
     nothing. Names are case-insensitive.
 
@@ -270,7 +372,8 @@ def parse_notify(value: Any, *, setting: str = "notify", where: str = "") -> tup
     """
     problem = (
         f'\'{setting}\'{where} must be "report" (open the report), "toast" (desktop '
-        'notification), "none", or a list such as ["report", "toast"].'
+        'notification), "email" (send the report by e-mail), "none", or a list such as '
+        '["report", "toast"].'
     )
     if isinstance(value, str):
         items = [item.strip().casefold() for item in value.split(",") if item.strip()]
@@ -296,6 +399,8 @@ def describe_notify(channels: Iterable[str]) -> str:
         parts.append("the report is opened")
     if "toast" in chosen:
         parts.append("a desktop notification is shown")
+    if "email" in chosen:
+        parts.append("the report is sent by e-mail")
     return " and ".join(parts) if parts else "the report is written but not opened"
 
 
@@ -342,7 +447,7 @@ def parse_field_assignment(text: str) -> tuple[str, str]:
     """
     name, separator, value = text.partition("=")
     if not separator:
-        raise ConfigError(f"Invalid field {text!r}: write NAME=VALUE, for example paper=TMY.")
+        raise ConfigError(f"Invalid field {text!r}: write NAME=VALUE, for example paper=Tau.")
     try:
         naming.check_custom_field_name(name.strip())
     except ValueError as exc:
@@ -421,6 +526,10 @@ def parse_config(
         naming.validate_template(template, custom_fields)
     except ValueError as exc:
         raise ConfigError(f"'workbook_name'{where}: {exc}") from exc
+    notify = _parse_notify_setting(data, where)
+    email = _parse_email(data.get("email", {}), where)
+    if "email" in notify:
+        check_email_ready(email, where=where)
 
     return Config(
         data_dir=data_dir,
@@ -434,7 +543,95 @@ def parse_config(
         notify_ignore=_parse_column_list(data, "notify_ignore", where),
         record_fields=_parse_column_choice(data, "record_fields", where),
         record_ignore=_parse_column_list(data, "record_ignore", where),
-        notify=_parse_notify_setting(data, where),
+        notify=notify,
+        time_in_status=_parse_bool(data, "time_in_status", False, where),
+        email=email,
+        language=_parse_language(data, where),
+    )
+
+
+def _parse_language(data: Mapping[str, Any], where: str) -> str:
+    value = data.get("language", i18n.DEFAULT_LANGUAGE)
+    if isinstance(value, str):
+        try:
+            return i18n.normalize_language(value)
+        except ValueError:
+            pass
+    raise ConfigError(f"'language'{where} must be one of {_language_choices()}, not {value!r}.")
+
+
+_EMAIL_KEYS = frozenset({"smtp_host", "smtp_port", "security", "username", "sender", "to"})
+
+
+def check_email_ready(email: EmailConfig, *, setting: str = "notify", where: str = "") -> None:
+    """Make sure that e-mails can be sent with these settings (the password aside).
+
+    Raises:
+        ConfigError: If a setting of the ``[email]`` table is missing.
+    """
+    if email.missing:
+        raise ConfigError(
+            f"'{setting}'{where} includes \"email\", but the [email] table lacks "
+            f"{', '.join(email.missing)}. See {DOCS_URL}#e-mail-notifications"
+        )
+
+
+def is_email_address(text: str) -> bool:
+    """Return ``True`` if *text* looks like an e-mail address.
+
+    Both ``me@example.org`` and ``Me <me@example.org>`` are accepted.
+    """
+    _name, address = parseaddr(text)
+    local, _at, domain = address.rpartition("@")
+    return bool(local and domain) and not any(char.isspace() for char in address)
+
+
+def _parse_email(value: Any, where: str) -> EmailConfig:
+    """Read the ``[email]`` table."""
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"'email'{where} must be a table: write its settings under [email].")
+    if any("password" in str(key).casefold() for key in value):
+        raise ConfigError(
+            f"[email]{where}: passwords are never read from the configuration file. Remove "
+            f"it, and set the {SMTP_PASSWORD_ENV_VAR} environment variable or store it in "
+            "the system keyring with: paper-status-monitor email set-password"
+        )
+    unknown = sorted(set(value) - _EMAIL_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"Unknown setting(s) in [email]{where}: {', '.join(unknown)}. Valid settings: "
+            f"{', '.join(sorted(_EMAIL_KEYS))}."
+        )
+    texts = {}
+    for key in ("smtp_host", "username", "sender"):
+        text = value.get(key, "")
+        if not isinstance(text, str):
+            raise ConfigError(f"'{key}' in [email]{where} must be a text.")
+        texts[key] = text.strip()
+    port = value.get("smtp_port")
+    if port is not None and (
+        isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536
+    ):
+        raise ConfigError(f"'smtp_port' in [email]{where} must be a port number, such as 587.")
+    security = value.get("security", "starttls")
+    if not isinstance(security, str) or security.strip().casefold() not in EMAIL_SECURITY_PORTS:
+        raise ConfigError(f'\'security\' in [email]{where} must be "starttls", "ssl" or "none".')
+    recipients = value.get("to", [])
+    if isinstance(recipients, str):
+        recipients = recipients.split(",")
+    if not isinstance(recipients, list) or not all(isinstance(item, str) for item in recipients):
+        raise ConfigError(f"'to' in [email]{where} must be an address or a list of addresses.")
+    to = tuple(item.strip() for item in recipients if item.strip())
+    for address in (*to, texts["sender"]):
+        if address and not is_email_address(address):
+            raise ConfigError(f"{address!r} in [email]{where} is not an e-mail address.")
+    return EmailConfig(
+        smtp_host=texts["smtp_host"],
+        smtp_port=port,
+        security=security.strip().casefold(),
+        username=texts["username"],
+        sender=texts["sender"],
+        to=to,
     )
 
 
@@ -475,7 +672,7 @@ def _parse_column_choice(data: Mapping[str, Any], key: str, where: str) -> tuple
 
 def _parse_fields(value: Any, name: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
-        raise ConfigError(f"{name}: 'fields' must be a table, e.g. fields = {{ paper = \"TMY\" }}.")
+        raise ConfigError(f"{name}: 'fields' must be a table, e.g. fields = {{ paper = \"Tau\" }}.")
     result: dict[str, str] = {}
     for key, item in value.items():
         try:
@@ -484,7 +681,7 @@ def _parse_fields(value: Any, name: str) -> dict[str, str]:
             raise ConfigError(f"{name}: {exc}") from exc
         if isinstance(item, bool) or not isinstance(item, (str, int, float)):
             raise ConfigError(
-                f'{name}: the custom field {key!r} must be a text, e.g. {key} = "TMY".'
+                f'{name}: the custom field {key!r} must be a text, e.g. {key} = "Tau".'
             )
         result[key] = clean_text(item)
     return result
@@ -523,9 +720,25 @@ def _parse_submissions(value: Any, where: str) -> tuple[SubmissionConfig, ...]:
             raise ConfigError(f"{name}: 'enabled' must be true or false.")
         fields = _parse_fields(entry.get("fields", {}), name)
         submissions.append(
-            SubmissionConfig(uuid=uuid, label=label.strip(), enabled=enabled, fields=fields)
+            SubmissionConfig(
+                uuid=uuid,
+                label=label.strip(),
+                enabled=enabled,
+                fields=fields,
+                overrides=_parse_overrides(entry, f" of submission #{index}{where}"),
+            )
         )
     return tuple(submissions)
+
+
+def _parse_overrides(entry: Mapping[str, Any], where: str) -> dict[str, tuple[str, ...] | None]:
+    """Read the ``record_*`` / ``notify_*`` settings written in a ``[[submissions]]`` table."""
+    overrides: dict[str, tuple[str, ...] | None] = {}
+    for key in SUBMISSION_OVERRIDES:
+        if key in entry:
+            parse = _parse_column_choice if key.endswith("_fields") else _parse_column_list
+            overrides[key] = parse(entry, key, where)
+    return overrides
 
 
 # --------------------------------------------------------------------------- writing
@@ -573,6 +786,10 @@ def _toml_notify(channels: tuple[str, ...]) -> str:
     return "[" + ", ".join(f'"{channel}"' for channel in channels) + "]"
 
 
+def _language_choices() -> str:
+    return ", ".join(f'"{code}" ({name})' for code, name in i18n.LANGUAGES.items())
+
+
 def dump_config(config: Config) -> str:
     """Return the text of a commented configuration file holding *config*.
 
@@ -594,6 +811,10 @@ def dump_config(config: Config) -> str:
         '# share a workbook: "{paper}" keeps all the submissions of a paper in one file.',
         f"workbook_name = {toml_string(config.workbook_name)}",
         "",
+        '# Add a "Time in status" sheet to every workbook: how long each submission spent',
+        "# in each status (the sheet is rewritten after every change).",
+        f"time_in_status = {_toml_bool(config.time_in_status)}",
+        "",
         '# Changes that add a row to the workbook: "all" or a list of columns such as',
         '# ["Status"], and columns whose changes alone never add a row.',
         f"record_fields = {_toml_choice(config.record_fields)}",
@@ -613,8 +834,13 @@ def dump_config(config: Config) -> str:
         "# Also report (and notify) the submissions that cannot be checked.",
         f"notify_on_errors = {_toml_bool(config.notify_on_errors)}",
         "",
+        "# Language of the reports, notifications, e-mails, summary and window:",
+        f"# {_language_choices()}. The workbooks and the command line stay in English.",
+        f"language = {toml_string(config.language)}",
+        "",
         "# Seconds to wait for each answer from the tracker.",
         f"request_timeout = {_toml_number(config.request_timeout)}",
+        *_email_lines(config.email),
         "",
         '# Add one [[submissions]] block per manuscript: paste the "Track your submission"',
         "# link you received by e-mail (or just the UUID it contains). For example:",
@@ -624,22 +850,72 @@ def dump_config(config: Config) -> str:
         '# label = "Demo submission"    # optional: short name shown in the reports',
         '# fields = { paper = "Demo" }  # optional: custom fields (names and columns)',
         "# enabled = true               # optional: set to false to pause monitoring",
+        "#",
+        "# A submission can also have its own record_fields, record_ignore, notify_fields",
+        "# or notify_ignore; each one replaces the general setting of the same name.",
     ]
     for submission in config.submissions:
         block = submission_block(
-            submission.uuid, submission.label, fields=submission.fields, enabled=submission.enabled
+            submission.uuid,
+            submission.label,
+            fields=submission.fields,
+            enabled=submission.enabled,
+            overrides=submission.overrides,
         )
         lines += ["", block.rstrip("\n")]
     return "\n".join(lines) + "\n"
 
 
-def render_config(data_dir: Path | str) -> str:
+def _email_lines(email: EmailConfig) -> list[str]:
+    """Return the ``[email]`` table of :func:`dump_config` (commented out when empty)."""
+    lines = [
+        "",
+        '# E-mail notifications (notify = "email"): the report is sent through this SMTP',
+        "# server. The password is never written here: set the",
+        f"# {SMTP_PASSWORD_ENV_VAR} environment variable, or run:",
+        "# paper-status-monitor email set-password",
+    ]
+    if email == EmailConfig():
+        return [
+            *lines,
+            "#",
+            "# [email]",
+            '# smtp_host = "smtp.example.org"',
+            '# security = "starttls"   # "starttls" (port 587), "ssl" (465) or "none" (25)',
+            '# username = "me@example.org"',
+            '# to = ["me@example.org"]',
+        ]
+    lines += ["[email]", f"smtp_host = {toml_string(email.smtp_host)}"]
+    if email.smtp_port is not None:
+        lines.append(f"smtp_port = {email.smtp_port}")
+    lines.append(f'security = "{email.security}"')
+    if email.username:
+        lines.append(f"username = {toml_string(email.username)}")
+    if email.sender:
+        lines.append(f"sender = {toml_string(email.sender)}")
+    lines.append(f"to = {_toml_list(email.to)}")
+    return lines
+
+
+def render_config(data_dir: Path | str, *, language: str = i18n.DEFAULT_LANGUAGE) -> str:
     """Return the text of a new, commented configuration file."""
-    return dump_config(Config(data_dir=Path(data_dir)))
+    return dump_config(Config(data_dir=Path(data_dir), language=language))
 
 
-def write_config(path: Path, data_dir: Path | str, *, overwrite: bool = False) -> Path:
+def write_config(
+    path: Path,
+    data_dir: Path | str,
+    *,
+    overwrite: bool = False,
+    language: str = i18n.DEFAULT_LANGUAGE,
+) -> Path:
     """Create a configuration file at *path*.
+
+    Args:
+        path: File to create.
+        data_dir: Folder for the workbooks and the reports.
+        overwrite: Replace the file if it exists.
+        language: Language of the reports and the window (see :mod:`~paper_status_monitor.i18n`).
 
     Raises:
         ConfigError: If the file exists and *overwrite* is ``False``.
@@ -648,7 +924,7 @@ def write_config(path: Path, data_dir: Path | str, *, overwrite: bool = False) -
         raise ConfigError(f"A configuration file already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(render_config(data_dir))
+        handle.write(render_config(data_dir, language=language))
     return path
 
 
@@ -692,6 +968,7 @@ def submission_block(
     *,
     fields: Mapping[str, str] | None = None,
     enabled: bool = True,
+    overrides: Mapping[str, tuple[str, ...] | None] | None = None,
 ) -> str:
     """Return the TOML block that declares one submission."""
     lines = ["[[submissions]]", f"url = {toml_string(tracker_url(uuid))}"]
@@ -699,9 +976,17 @@ def submission_block(
         lines.append(f"label = {toml_string(label)}")
     if fields:
         lines.append(f"fields = {_toml_table(fields)}")
+    for key in SUBMISSION_OVERRIDES:
+        if overrides and key in overrides:
+            lines.append(f"{key} = {_toml_setting(key, overrides[key])}")
     if not enabled:
         lines.append("enabled = false")
     return "\n".join(lines) + "\n"
+
+
+def _toml_setting(key: str, value: tuple[str, ...] | None) -> str:
+    """Write the value of a ``*_fields`` (``"all"`` or a list) or ``*_ignore`` setting."""
+    return _toml_choice(value) if key.endswith("_fields") else _toml_list(value or ())
 
 
 def add_submission(
@@ -825,6 +1110,99 @@ def set_submission_enabled(path: Path, uuid: str, enabled: bool) -> tuple[Submis
     return submission, True
 
 
+def edit_submission(
+    path: Path,
+    uuid: str,
+    *,
+    label: str | None = None,
+    fields: Mapping[str, str] | None = None,
+    overrides: Mapping[str, tuple[str, ...] | None] | None = None,
+) -> tuple[SubmissionConfig, SubmissionConfig]:
+    """Change the label, the custom fields or the own settings of a submission, keeping
+    the rest of the text.
+
+    Only the lines of those keys in its ``[[submissions]]`` table (or the lines of its
+    ``[submissions.fields]`` table) change; missing lines are added after the tracking
+    link. The previous file is kept as ``<name>.bak``. Existing workbooks keep their
+    names: use :mod:`~paper_status_monitor.organize` to rename them.
+
+    Args:
+        path: Configuration file.
+        uuid: Tracking UUID of the submission (see :func:`find_submission`).
+        label: New label (``""`` removes it), or ``None`` to keep the current one.
+        fields: New custom fields, all of them (fields left out are removed), or
+            ``None`` to keep the current ones.
+        overrides: New own settings (see :attr:`SubmissionConfig.overrides`), all of
+            them (settings left out follow the general ones again), or ``None`` to
+            keep the current ones.
+
+    Returns:
+        The submission before and after the change. They are equal when there was
+        nothing to change, and the file is then not written.
+
+    Raises:
+        ConfigError: If the submission is not in the file, a value is invalid, the
+            configuration would become invalid (for example, ``workbook_name`` uses a
+            custom field that only this submission has) or the file is too unusual to
+            be edited safely. The file is then left unchanged.
+    """
+    config = load_config(path)
+    submission = find_submission(config, uuid)
+    name = f"Submission {submission.display_name}"
+    changed = replace(
+        submission,
+        label=submission.label if label is None else label.strip(),
+        fields=dict(submission.fields) if fields is None else _parse_fields(dict(fields), name),
+        overrides=(
+            dict(submission.overrides) if overrides is None else _check_overrides(overrides, name)
+        ),
+    )
+    if changed == submission:
+        return submission, submission
+    position = config.submissions.index(submission)
+    expected = replace(
+        config,
+        submissions=tuple(changed if s is submission else s for s in config.submissions),
+    )
+
+    def edit(lines: list[str], block: _Block) -> list[str]:
+        if changed.label != submission.label:
+            value = toml_string(changed.label) if changed.label else None
+            lines = _set_key_line(lines, block, "label", value, ("url", "uuid"))
+        if dict(changed.fields) != dict(submission.fields):
+            block = _submission_blocks(lines)[position]
+            lines = _set_fields_lines(lines, block, submission.fields, changed.fields)
+        for number, key in enumerate(SUBMISSION_OVERRIDES):
+            old, new = submission.overrides.get(key, _UNSET), changed.overrides.get(key, _UNSET)
+            if old == new:
+                continue
+            block = _submission_blocks(lines)[position]
+            value = None if new is _UNSET else _toml_setting(key, new)  # type: ignore[arg-type]
+            anchors = ("url", "uuid", "label", "fields", *SUBMISSION_OVERRIDES[:number])
+            lines = _set_key_line(lines, block, key, value, anchors)
+        return lines
+
+    _edit_submission(config, submission, edit, expected)
+    return submission, changed
+
+
+_UNSET = object()
+
+
+def _check_overrides(
+    overrides: Mapping[str, tuple[str, ...] | None], name: str
+) -> dict[str, tuple[str, ...] | None]:
+    """Validate the own settings of a submission given as Python values."""
+    unknown = sorted(set(overrides) - set(SUBMISSION_OVERRIDES))
+    if unknown:
+        raise ConfigError(
+            f"{name}: unknown setting(s) {', '.join(unknown)}. A submission can have its "
+            f"own {', '.join(SUBMISSION_OVERRIDES)}."
+        )
+    data = {key: "all" if value is None else list(value) for key, value in overrides.items()}
+    return _parse_overrides(data, f" of {name}")
+
+
 def _edit_submission(
     config: Config,
     submission: SubmissionConfig,
@@ -927,12 +1305,17 @@ def _delete_lines(lines: list[str], start: int, end: int) -> list[str]:
     return result
 
 
-def _set_enabled_line(lines: list[str], block: _Block, enabled: bool) -> list[str]:
-    """Write ``enabled = <value>`` in the main table of a ``[[submissions]]`` block."""
-    main_end = next(
+def _main_table_end(lines: list[str], block: _Block) -> int:
+    """Return the line after the main table of a block (its first sub-table, or its end)."""
+    return next(
         (i for i in range(block.header + 1, block.end) if _table_header(lines[i]) is not None),
         block.end,
     )
+
+
+def _set_enabled_line(lines: list[str], block: _Block, enabled: bool) -> list[str]:
+    """Write ``enabled = <value>`` in the main table of a ``[[submissions]]`` block."""
+    main_end = _main_table_end(lines, block)
     for index in range(block.header + 1, main_end):
         match = _ENABLED_LINE.fullmatch(lines[index])
         if match is not None:
@@ -948,3 +1331,209 @@ def _set_enabled_line(lines: list[str], block: _Block, enabled: bool) -> list[st
     indent = keys[0][: len(keys[0]) - len(keys[0].lstrip())] if keys else ""
     lines.insert(position, f"{indent}enabled = false")
     return lines
+
+
+@dataclass(frozen=True)
+class _KeyLine:
+    """A ``key = value  # comment`` line whose value ends on the same line."""
+
+    indent: str
+    raw_key: str
+    separator: str
+    value: str
+    tail: str
+
+    @property
+    def key(self) -> str:
+        """The key without quotes."""
+        return self.raw_key.strip("\"'")
+
+    def with_value(self, value: str) -> str:
+        """Return the line with another value, keeping the layout and the comment."""
+        return f"{self.indent}{self.raw_key}{self.separator}{value}{self.tail}"
+
+
+_KEY_VALUE_LINE = re.compile(
+    r"(\s*)([A-Za-z0-9_-]+|\"[A-Za-z0-9_-]+\"|'[A-Za-z0-9_-]+')(\s*=\s*)(.*)"
+)
+
+
+def _key_line(line: str) -> _KeyLine | None:
+    """Split a one-line ``key = value`` pair; ``None`` for anything else."""
+    match = _KEY_VALUE_LINE.fullmatch(line)
+    if match is None:
+        return None
+    indent, raw_key, separator, rest = match.groups()
+    end = _value_end(rest)
+    if end is None:
+        return None
+    value = rest[:end].rstrip()
+    return _KeyLine(indent, raw_key, separator, value, rest[len(value) :])
+
+
+def _value_end(text: str) -> int | None:
+    """Return the length of the TOML value at the start of *text*.
+
+    Strings, arrays and inline tables are followed to their end; ``None`` means that
+    the value goes on in the next lines (or that the text is not a value).
+    """
+    depth = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "\"'":
+            end = _string_end(text, index)
+            if end is None:
+                return None
+            if depth == 0:
+                return end
+            index = end
+            continue
+        if char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth <= 0:
+                return index + 1 if depth == 0 else None
+        elif char == "#" or (depth == 0 and char.isspace()):
+            return None if depth else index
+        index += 1
+    return None if depth else index
+
+
+def _string_end(text: str, start: int) -> int | None:
+    """Return the position after the TOML string that starts at ``text[start]``."""
+    quote = text[start]
+    if text.startswith(quote * 3, start):
+        close = text.find(quote * 3, start + 3)
+        return None if close < 0 else close + 3
+    index = start + 1
+    while index < len(text):
+        if quote == '"' and text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == quote:
+            return index + 1
+        index += 1
+    return None
+
+
+def _find_key(lines: list[str], start: int, end: int, key: str) -> tuple[int, _KeyLine] | None:
+    """Return the first ``key = ...`` line in ``lines[start:end]``."""
+    for index in range(start, end):
+        parsed = _key_line(lines[index])
+        if parsed is not None and parsed.key == key:
+            return index, parsed
+    return None
+
+
+def _new_key_position(lines: list[str], block: _Block, after: Iterable[str]) -> tuple[int, str]:
+    """Return where a new key goes in the main table of *block*, and its indentation.
+
+    It goes right after the last of the keys *after* that the table has, or after
+    its last key.
+    """
+    main_end = _main_table_end(lines, block)
+    anchors = set(after)
+    position: int | None = None
+    indent: str | None = None
+    for index in range(block.header + 1, main_end):
+        parsed = _key_line(lines[index])
+        if parsed is None:
+            continue
+        if indent is None:
+            indent = parsed.indent
+        if parsed.key in anchors:
+            position, indent = index + 1, parsed.indent
+    if position is None:
+        position = main_end
+        while position > block.header + 1 and _is_blank_or_comment(lines[position - 1]):
+            position -= 1
+    return position, indent or ""
+
+
+def _set_key_line(
+    lines: list[str], block: _Block, key: str, value: str | None, after: Iterable[str]
+) -> list[str]:
+    """Write ``key = value`` (TOML text) in the main table of a block.
+
+    ``value=None`` removes the line. A missing line is added after the last of the
+    keys *after* that the table has (see :func:`_new_key_position`).
+    """
+    found = _find_key(lines, block.header + 1, _main_table_end(lines, block), key)
+    if found is not None:
+        index, line = found
+        if value is None:
+            del lines[index]
+        else:
+            lines[index] = line.with_value(value)
+    elif value is not None:
+        position, indent = _new_key_position(lines, block, after)
+        lines.insert(position, f"{indent}{key} = {value}")
+    return lines
+
+
+def _set_fields_lines(
+    lines: list[str], block: _Block, before: Mapping[str, str], after: Mapping[str, str]
+) -> list[str]:
+    """Write the custom fields of a block: the ``fields = { ... }`` line, or the lines
+    of its ``[submissions.fields]`` table (no fields: the line or the table goes)."""
+    found = _find_key(lines, block.header + 1, _main_table_end(lines, block), "fields")
+    if found is not None:
+        index, line = found
+        if after:
+            lines[index] = line.with_value(_toml_table(after))
+        else:
+            del lines[index]
+        return lines
+    table = _sub_table(lines, block, "submissions.fields")
+    if table is not None:
+        start, end = table
+        if not after:
+            return _delete_lines(lines, start, end)
+        return (
+            lines[: start + 1] + _field_lines(lines[start + 1 : end], before, after) + lines[end:]
+        )
+    if after:
+        position, indent = _new_key_position(lines, block, ("url", "uuid", "label"))
+        lines.insert(position, f"{indent}fields = {_toml_table(after)}")
+    return lines
+
+
+def _sub_table(lines: list[str], block: _Block, name: str) -> tuple[int, int] | None:
+    """Return the header and the end of the sub-table *name* of a block, if it has one."""
+    for index in range(block.header + 1, block.end):
+        if _table_header(lines[index]) == (False, name):
+            end = next(
+                (j for j in range(index + 1, block.end) if _table_header(lines[j]) is not None),
+                block.end,
+            )
+            return index, end
+    return None
+
+
+def _field_lines(body: list[str], before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
+    """Rewrite the key lines of a ``[submissions.fields]`` table, keeping its comments.
+
+    Unchanged fields keep their line, removed fields lose it and new fields are
+    written after the last key.
+    """
+    pending = dict(after)
+    result: list[str] = []
+    last_key = -1
+    indent = ""
+    for line in body:
+        parsed = _key_line(line)
+        if parsed is None:
+            result.append(line)
+            continue
+        indent = parsed.indent
+        if parsed.key not in pending:
+            continue
+        value = pending.pop(parsed.key)
+        result.append(
+            line if before.get(parsed.key) == value else parsed.with_value(toml_string(value))
+        )
+        last_key = len(result) - 1
+    new = [f"{indent}{toml_key(name)} = {toml_string(value)}" for name, value in pending.items()]
+    return result[: last_key + 1] + new + result[last_key + 1 :]

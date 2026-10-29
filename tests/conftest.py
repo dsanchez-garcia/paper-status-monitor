@@ -3,25 +3,39 @@
 Every test runs with HOME, APPDATA, LOCALAPPDATA and the XDG variables pointing to a
 temporary folder, so the real configuration, logs and Startup folder of the
 developer are never touched. No test reaches the network unless it is marked
-with ``@pytest.mark.network``.
+with ``@pytest.mark.network``. No test can send an e-mail or use the system keyring:
+use the ``smtp`` and ``fake_keyring`` fixtures. Every test starts in English, and
+the language chosen by a test (for instance, by opening a window whose configuration
+says ``language = "es"``) never leaks into the next one.
 """
 
 from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable
+import smtplib
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
+from paper_status_monitor import emails, i18n
 from paper_status_monitor.client import DEMO_UUID, TrackerUnavailableError
-from paper_status_monitor.config import Config, SubmissionConfig
+from paper_status_monitor.config import SMTP_PASSWORD_ENV_VAR, Config, SubmissionConfig
 from paper_status_monitor.models import Snapshot
 
 DATA_DIR = Path(__file__).parent / "data"
+
+
+@pytest.fixture(autouse=True)
+def english_by_default() -> Iterator[None]:
+    """Start every test in English and restore English afterwards."""
+    i18n.set_language(i18n.DEFAULT_LANGUAGE)
+    yield
+    i18n.set_language(i18n.DEFAULT_LANGUAGE)
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +50,92 @@ def isolated_user_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
     monkeypatch.delenv("PAPER_STATUS_MONITOR_CONFIG", raising=False)
+    monkeypatch.delenv(SMTP_PASSWORD_ENV_VAR, raising=False)
+    monkeypatch.setattr(emails, "_keyring", lambda: None)
+    monkeypatch.setattr(emails.smtplib, "SMTP", _NoSMTP)
+    monkeypatch.setattr(emails.smtplib, "SMTP_SSL", _NoSMTP)
     return home
+
+
+class _NoSMTP:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("Tests must not contact a real SMTP server: use the smtp fixture.")
+
+
+class FakeSMTP:
+    """Stand-in for :class:`smtplib.SMTP` that records the conversation."""
+
+    servers: ClassVar[list[FakeSMTP]] = []
+    fail_login: ClassVar[bool] = False
+
+    def __init__(
+        self, host: str, port: int, timeout: float | None = None, context: Any = None
+    ) -> None:
+        self.host, self.port, self.timeout = host, port, timeout
+        self.encrypted = context is not None  # SMTP_SSL receives an SSL context
+        self.calls: list[Any] = []
+        FakeSMTP.servers.append(self)
+
+    def __enter__(self) -> FakeSMTP:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.calls.append("quit")
+
+    def starttls(self, context: Any = None) -> None:
+        self.calls.append("starttls")
+
+    def login(self, user: str, password: str) -> None:
+        if FakeSMTP.fail_login:
+            raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+        self.calls.append(("login", user, password))
+
+    def send_message(self, message: EmailMessage) -> None:
+        self.calls.append(("send", message))
+
+    @classmethod
+    def sent(cls) -> list[EmailMessage]:
+        """The messages sent through every fake server."""
+        return [
+            call[1]
+            for server in cls.servers
+            for call in server.calls
+            if isinstance(call, tuple) and call[0] == "send"
+        ]
+
+
+@pytest.fixture
+def smtp(monkeypatch: pytest.MonkeyPatch) -> type[FakeSMTP]:
+    """Send e-mails to :class:`FakeSMTP` instead of a real server."""
+    FakeSMTP.servers = []
+    FakeSMTP.fail_login = False
+    monkeypatch.setattr(emails.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(emails.smtplib, "SMTP_SSL", FakeSMTP)
+    return FakeSMTP
+
+
+class FakeKeyring:
+    """A system keyring kept in memory (the interface of the ``keyring`` package)."""
+
+    def __init__(self) -> None:
+        self.passwords: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, user: str) -> str | None:
+        return self.passwords.get((service, user))
+
+    def set_password(self, service: str, user: str, password: str) -> None:
+        self.passwords[(service, user)] = password
+
+    def delete_password(self, service: str, user: str) -> None:
+        del self.passwords[(service, user)]
+
+
+@pytest.fixture
+def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> FakeKeyring:
+    """Make the e-mail module use an in-memory keyring."""
+    keyring = FakeKeyring()
+    monkeypatch.setattr(emails, "_keyring", lambda: keyring)
+    return keyring
 
 
 @pytest.fixture

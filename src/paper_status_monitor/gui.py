@@ -3,7 +3,7 @@
 The window has four tabs:
 
 * **Submissions** - add, edit, remove, pause and check the monitored submissions,
-  including their custom fields (for example ``paper = TMY``), and see the latest
+  including their custom fields (for example ``paper = Tau``), and see the latest
   status of all of them in one table (*Summary*);
 * **Notifications** - choose, column by column, which changes add a row to the
   workbook (*Record*) and which are reported (*Notify*), and how you are told about
@@ -11,14 +11,15 @@ The window has four tabs:
 * **Workbooks** - the data folder and the workbook name template, with a preview
   of the resulting names and a button to rename or merge existing workbooks;
 * **Run** - check every submission now (or do a dry run), open the last report,
-  set the request timeout and manage the Windows autostart, including periodic
-  checks while you stay logged in.
+  set the request timeout and manage the autostart at login (Windows, Linux and
+  macOS), including periodic checks while you stay logged in.
 
 Settings are written to the configuration file when you click *Save* (the previous
-file is kept as ``config.toml.bak``). The window uses :mod:`tkinter`, part of the
-standard library. This module holds the logic that does not depend on widgets, so
-it can be tested without a display; the widgets live in a private module that is
-only imported when the window opens.
+file is kept as ``config.toml.bak``). The window is shown in the language of the
+configuration (``language``), which can be changed at the bottom of the window. It
+uses :mod:`tkinter`, part of the standard library. This module holds the logic that
+does not depend on widgets, so it can be tested without a display; the widgets live
+in a private module that is only imported when the window opens.
 """
 
 from __future__ import annotations
@@ -30,26 +31,36 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
-from paper_status_monitor import naming, organize, scheduling
+from paper_status_monitor import i18n, naming, organize, scheduling
 from paper_status_monitor.config import (
     Config,
     ConfigError,
+    EmailConfig,
     SubmissionConfig,
     parse_config,
+    select_columns,
     split_columns,
 )
+from paper_status_monitor.i18n import N_, _
 from paper_status_monitor.models import Snapshot, clean_text
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised only on Python 3.10
+    import tomli as tomllib
 
 log = logging.getLogger(__name__)
 
-#: Workbook name templates offered by the window (label to template).
+#: Workbook name templates offered by the window (label to template). The labels are
+#: in English: translate them with :func:`~paper_status_monitor.i18n.gettext`.
 NAME_PRESETS: dict[str, str] = {
-    "Manuscript number - Journal - Title (default)": naming.DEFAULT_WORKBOOK_NAME,
-    "Paper - Journal - Manuscript number": "{paper} - {journal} - {manuscript_number}",
-    "Paper - Date of submission - Journal": "{paper} - {date_of_submission} - {journal}",
-    "One workbook per paper (all journals)": "{paper}",
-    "Journal acronym - Manuscript number - Title": (
+    N_("Manuscript number - Journal - Title (default)"): naming.DEFAULT_WORKBOOK_NAME,
+    N_("Paper - Journal - Manuscript number"): "{paper} - {journal} - {manuscript_number}",
+    N_("Paper - Date of submission - Journal"): "{paper} - {date_of_submission} - {journal}",
+    N_("One workbook per paper (all journals)"): "{paper}",
+    N_("Journal acronym - Manuscript number - Title"): (
         "{journal_acronym} - {manuscript_number} - {title}"
     ),
 }
@@ -88,15 +99,21 @@ def parse_fields_text(text: str) -> dict[str, str]:
         separator = "=" if "=" in line else ":" if ":" in line else ""
         if not separator:
             raise ConfigError(
-                f"Custom fields, line {number}: {line!r} must look like 'paper = TMY'."
+                _("Custom fields, line {number}: {line} must look like 'paper = Tau'.").format(
+                    number=number, line=repr(line)
+                )
             )
-        name, _, value = (part.strip() for part in line.partition(separator))
+        name, _separator, value = (part.strip() for part in line.partition(separator))
         try:
             naming.check_custom_field_name(name)
         except ValueError as exc:
-            raise ConfigError(f"Custom fields, line {number}: {exc}") from exc
+            raise ConfigError(
+                _("Custom fields, line {number}: {error}").format(number=number, error=exc)
+            ) from exc
         if name in fields:
-            raise ConfigError(f"The custom field {name!r} is written twice.")
+            raise ConfigError(
+                _("The custom field {name} is written twice.").format(name=repr(name))
+            )
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         fields[name] = clean_text(value)
@@ -109,8 +126,41 @@ def format_fields_text(fields: Mapping[str, str]) -> str:
 
 
 def format_fields_inline(fields: Mapping[str, str]) -> str:
-    """Return custom fields on one line, e.g. ``"paper=TMY, project=X"``."""
+    """Return custom fields on one line, e.g. ``"paper=Tau, project=X"``."""
     return ", ".join(f"{name}={value}" for name, value in fields.items())
+
+
+def effective_columns(
+    general: Iterable[str], overrides: Mapping[str, tuple[str, ...] | None], kind: str
+) -> tuple[str, ...]:
+    """Return the columns recorded or notified for a submission.
+
+    Args:
+        general: Columns chosen in the general settings.
+        overrides: Own settings of the submission (:attr:`SubmissionConfig.overrides`).
+        kind: ``"record"`` or ``"notify"``.
+    """
+    fields, ignore = split_columns(general)
+    own_fields = overrides.get(f"{kind}_fields", fields)
+    own_ignore = overrides.get(f"{kind}_ignore", ignore)
+    return select_columns(own_fields, own_ignore or ())
+
+
+def own_settings(
+    recorded: Iterable[str], notified: Iterable[str]
+) -> dict[str, tuple[str, ...] | None]:
+    """Return the own settings of a submission that records and notifies these columns.
+
+    All four settings are written, so the choice does not depend on the general ones.
+    """
+    record_fields, record_ignore = split_columns(recorded)
+    notify_fields, notify_ignore = split_columns(notified)
+    return {
+        "record_fields": record_fields,
+        "record_ignore": record_ignore,
+        "notify_fields": notify_fields,
+        "notify_ignore": notify_ignore,
+    }
 
 
 def build_config(
@@ -124,6 +174,9 @@ def build_config(
     request_timeout: str | float,
     submissions: Sequence[SubmissionConfig],
     path: Path | None = None,
+    time_in_status: bool = False,
+    email: EmailConfig | None = None,
+    language: str = i18n.DEFAULT_LANGUAGE,
 ) -> Config:
     """Validate the values shown in the window and return the configuration.
 
@@ -137,6 +190,10 @@ def build_config(
         request_timeout: Seconds per request, possibly as text.
         submissions: Submissions, in order.
         path: Configuration file (used to resolve a relative data folder).
+        time_in_status: Add the *Time in status* sheet to the workbooks.
+        email: How e-mails are sent (needed when *notify* includes ``"email"``).
+        language: Language of the reports and the window (a code of
+            :data:`~paper_status_monitor.i18n.LANGUAGES`).
 
     Raises:
         ConfigError: With a message that can be shown to the user.
@@ -144,7 +201,7 @@ def build_config(
     try:
         timeout = float(str(request_timeout).strip().replace(",", "."))
     except ValueError:
-        raise ConfigError("The timeout must be a number of seconds, for example 30.") from None
+        raise ConfigError(_("The timeout must be a number of seconds, for example 30.")) from None
     record_fields, record_ignore = split_columns(recorded)
     notify_fields, notify_ignore = split_columns(notified)
     data = {
@@ -157,17 +214,70 @@ def build_config(
         "notify": list(notify),
         "notify_on_errors": notify_on_errors,
         "request_timeout": timeout,
+        "time_in_status": time_in_status,
+        "language": language,
         "submissions": [
             {
                 "uuid": submission.uuid,
                 "label": submission.label,
                 "enabled": submission.enabled,
                 "fields": dict(submission.fields),
+                **{
+                    key: "all" if value is None else list(value)
+                    for key, value in submission.overrides.items()
+                },
             }
             for submission in submissions
         ],
     }
+    if email is not None and email != EmailConfig():
+        data["email"] = email_table(email)
     return parse_config(data, base_dir=path.parent if path else None, path=path)
+
+
+def email_settings(
+    *, smtp_host: str, smtp_port: str, security: str, username: str, sender: str, to: str
+) -> EmailConfig:
+    """Validate the e-mail settings typed in the window.
+
+    Args:
+        smtp_host: Name of the SMTP server.
+        smtp_port: Port, as typed (empty: the usual port of *security*).
+        security: ``"starttls"``, ``"ssl"`` or ``"none"``.
+        username: Login name (empty: no login).
+        sender: ``From`` address (empty: the user name).
+        to: Recipients, separated by commas.
+
+    Raises:
+        ConfigError: With a message that can be shown to the user.
+    """
+    table: dict[str, Any] = {
+        "smtp_host": smtp_host,
+        "security": security,
+        "username": username,
+        "sender": sender,
+        "to": to,
+    }
+    port = smtp_port.strip()
+    if port:
+        if not port.isdigit():
+            raise ConfigError(_("The port must be a number, such as 587 (empty: the usual port)."))
+        table["smtp_port"] = int(port)
+    return parse_config({"email": table}).email
+
+
+def email_table(email: EmailConfig) -> dict[str, Any]:
+    """Return *email* as the ``[email]`` table of a configuration."""
+    table: dict[str, Any] = {
+        "smtp_host": email.smtp_host,
+        "security": email.security,
+        "username": email.username,
+        "sender": email.sender,
+        "to": list(email.to),
+    }
+    if email.smtp_port is not None:
+        table["smtp_port"] = email.smtp_port
+    return table
 
 
 def preview_rows(
@@ -184,7 +294,13 @@ def preview_rows(
         submission = item.submission
         if item.current is None:
             example = naming.workbook_file_name(config.workbook_name, EXAMPLE_SNAPSHOT, submission)
-            rows.append((submission.display_name, "(not recorded yet)", f"{example} (example)"))
+            rows.append(
+                (
+                    submission.display_name,
+                    _("(not recorded yet)"),
+                    _("{name} (example)").format(name=example),
+                )
+            )
         else:
             rows.append((submission.display_name, item.current.name, item.expected or ""))
     return rows
@@ -203,7 +319,7 @@ def parse_hours(text: str) -> timedelta | None:
         hours = -1.0
     if not math.isfinite(hours) or hours < 0:
         raise ConfigError(
-            "The interval must be a number of hours, for example 12 (0 = only at login)."
+            _("The interval must be a number of hours, for example 12 (0 = only at login).")
         )
     if hours == 0:
         return None
@@ -211,8 +327,10 @@ def parse_hours(text: str) -> timedelta | None:
     if interval < scheduling.MIN_INTERVAL:
         minimum = scheduling.format_interval(scheduling.MIN_INTERVAL)
         raise ConfigError(
-            f"Checking every {value} hours is too often: the minimum is {minimum}. Review "
-            "statuses change over days, and frequent checks only load the tracker."
+            _(
+                "Checking every {value} hours is too often: the minimum is {minimum}. Review "
+                "statuses change over days, and frequent checks only load the tracker."
+            ).format(value=value, minimum=minimum)
         )
     return interval
 
@@ -229,14 +347,32 @@ def placeholders_help(custom_fields: Iterable[str] = ()) -> str:
     """Return the text that lists the placeholders available for workbook names."""
     builtin = "  ".join(f"{{{name}}}" for name in naming.PLACEHOLDERS)
     custom = "  ".join(f"{{{name}}}" for name in sorted(set(custom_fields)))
-    return (
-        f"Placeholders: {builtin}\n"
-        f"Custom fields: {custom or 'none yet (add them to a submission, e.g. paper = TMY)'}\n"
-        "Write {title:.40} to keep only the first 40 characters. Submissions whose names "
-        "coincide share a workbook, so {paper} keeps all the submissions of a paper (to "
-        "any journal) in one file. Existing workbooks keep their names until you click "
-        "'Organize workbooks'."
+    custom = custom or _("none yet (add them to a submission, e.g. paper = Tau)")
+    return "\n".join(
+        (
+            _("Placeholders: {placeholders}").format(placeholders=builtin),
+            _("Custom fields: {fields}").format(fields=custom),
+            _(
+                "Write {title:.40} to keep only the first 40 characters. Submissions whose "
+                "names coincide share a workbook, so {paper} keeps all the submissions of a "
+                "paper (to any journal) in one file. Existing workbooks keep their names until "
+                "you click 'Organize workbooks'."
+            ),
+        )
     )
+
+
+def configured_language(config_path: Path) -> str:
+    """Return the language chosen in a configuration file (English if there is none).
+
+    Only the ``language`` setting is read, so the window opens in that language even
+    when another setting is invalid.
+    """
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        return i18n.normalize_language(data.get("language", i18n.DEFAULT_LANGUAGE))
+    except (OSError, ValueError):  # missing file, invalid TOML or unknown language
+        return i18n.DEFAULT_LANGUAGE
 
 
 def run_gui(config_path: Path | None = None) -> int:

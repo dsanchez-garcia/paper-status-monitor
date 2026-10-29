@@ -1,8 +1,7 @@
 # Installation
 
 `paper-status-monitor` needs **Python 3.10 or newer**. It works on Windows, Linux
-and macOS; the built-in autostart is currently Windows-only (see {doc}`autostart`
-for the alternatives).
+and macOS, and can run automatically at login on all three (see {doc}`autostart`).
 
 ## From PyPI
 
@@ -63,4 +62,11 @@ Only two third-party packages are required: [requests](https://requests.readthed
 (HTTP) and [openpyxl](https://openpyxl.readthedocs.io) (Excel files), plus
 [tomli](https://pypi.org/project/tomli/) on Python 3.10. No browser, Selenium or
 ChromeDriver is needed.
+
+The optional `keyring` extra keeps the password of your SMTP server in the system
+keyring, for e-mail notifications (see {doc}`configuration`):
+
+```console
+python -m pip install "paper-status-monitor[keyring]"
+```
 

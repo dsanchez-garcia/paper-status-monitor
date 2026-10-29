@@ -2,25 +2,37 @@
 
 The monitor is designed to run unattended, typically once every time you log in.
 
-## Windows (built in)
+## Enable it
 
 ```console
 paper-status-monitor autostart enable
 ```
 
-This creates `paper-status-monitor.lnk` in your *Startup* folder
-(`shell:startup`, i.e. `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`).
-The shortcut runs:
+This creates a launcher that runs the monitor in the background, without a window,
+every time you log in:
+
+| System | Launcher |
+| --- | --- |
+| Windows | A shortcut, `paper-status-monitor.lnk`, in your *Startup* folder (`shell:startup`, i.e. `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`). |
+| Linux | An XDG autostart entry, `~/.config/autostart/paper-status-monitor.desktop` (in `$XDG_CONFIG_HOME/autostart` if that variable is set). |
+| macOS | A launchd agent, `~/Library/LaunchAgents/io.github.paper-status-monitor.plist`. |
+
+The launcher runs:
 
 ```text
-<python folder>\pythonw.exe -m paper_status_monitor run --wait 300
+<python> -m paper_status_monitor run --wait 300
 ```
 
-- `pythonw.exe` runs without a console window. You only see something when there is
-  news: the report opens in your text editor.
+- `<python>` is the interpreter that ran `autostart enable` (on Windows, the
+  `pythonw.exe` next to it, which runs without a console window). You only see
+  something when there is news: the report opens in your text editor, or a desktop
+  notification is shown (see `notify` in {doc}`configuration`).
 - `--wait 300` gives the network and cloud drives (Google Drive, OneDrive...) up to
   five minutes to become available. Change it with `autostart enable --wait SECONDS`.
-- No administrator rights are needed.
+- No administrator rights are needed, and the launcher takes effect at your next
+  login.
+- With the global `--config PATH` option (`paper-status-monitor --config my.toml
+  autostart enable`), the launcher uses that configuration file.
 
 Check or remove it with:
 
@@ -30,15 +42,16 @@ paper-status-monitor autostart disable
 ```
 
 ```{warning}
-The shortcut points to the Python interpreter that ran `autostart enable`. If you
+The launcher points to the Python interpreter that ran `autostart enable`. If you
 uninstall or replace that Python (for example, when upgrading to a new Python
-version), the shortcut stops working. Install the package in the new interpreter and
-run `paper-status-monitor autostart enable` again. `paper-status-monitor doctor`
+version, or when you delete the virtual environment you installed the package in),
+the launcher stops working. Install the package in the new interpreter and run
+`paper-status-monitor autostart enable` again. `paper-status-monitor doctor`
 reports this problem.
 ```
 
 (periodic-checks)=
-### Periodic checks while you stay logged in
+## Periodic checks while you stay logged in
 
 If your computer stays on, with your session open, for days, also check
 periodically:
@@ -57,7 +70,42 @@ restarted after you change it. The graphical interface offers the same (*Run →
 check again every ... hours*), and `autostart status` shows when the checks run.
 
 On any system, `paper-status-monitor run --every 12h` does the same in a terminal,
-until you press `Ctrl+C`.
+until you press `Ctrl+C`. Only one loop of periodic checks runs at a time: while the
+one started at login runs, a second `run --every` is refused (a single `run` is
+still allowed), and `paper-status-monitor doctor` shows which process runs them.
+
+(tray-icon)=
+### An icon in the notification area (Windows)
+
+Add `--tray` to see that the periodic checks are running:
+
+```console
+paper-status-monitor autostart enable --every 12h --tray
+```
+
+An icon (a blue disc with a white tick) then stays in the notification area of the
+taskbar while the checks run. Its tooltip says when the last check ran, whether it
+found news, and when the next one is due. Click it (with either button) for a menu
+with the latest status of every submission and:
+
+- **Check now**: check at once, without waiting for the next check;
+- **Open the window**: the graphical interface (also when you click a submission);
+- **Open the last report** and **Open the data folder**;
+- **Stop the periodic checks**: until your next login (the launcher is kept).
+
+The icon follows the `language` setting. Windows may place new icons in the hidden
+part of the notification area (the `^` arrow); drag it to the taskbar, or turn it on
+in *Settings → Personalization → Taskbar → Other system tray icons*, to keep it in
+sight. In the graphical interface, tick *Show an icon in the notification area*
+under *Run automatically at login*. `run --every 12h --tray` shows it from a
+terminal too. If the icon cannot be shown, the problem is logged and the checks go on
+without it.
+
+## Windows
+
+The shortcut is created through PowerShell, which is part of Windows. You can also
+see it, and turn it off, in *Settings → Apps → Startup* (or in the *Startup* tab of
+the Task Manager).
 
 ### Alternative: Task Scheduler
 
@@ -81,55 +129,66 @@ lock of the first one and exit.
 
 ## Linux
 
-Use a cron job that runs at boot and every day:
+XDG autostart entries are started by the desktop environment (GNOME, KDE Plasma,
+Xfce, Cinnamon, MATE...) when you log in to the desktop, so the report can be opened
+and notifications can be shown. Most desktops also list the entry in their startup
+settings (for example, *GNOME Tweaks → Startup Applications*), where you can turn it
+off.
+
+On a computer without a desktop, such as a server used through SSH, autostart
+entries are never started (`autostart enable` warns you when it finds no graphical
+session). Use cron or a systemd user timer instead, and write the report without
+opening it (`--notify none`). A cron job that runs at boot and every day:
 
 ```text
-@reboot   sleep 60 && $HOME/.local/bin/paper-status-monitor run --wait 300 --no-open
-0 9 * * * $HOME/.local/bin/paper-status-monitor run --no-open
+@reboot   sleep 60 && $HOME/.local/bin/paper-status-monitor run --wait 300 --notify none
+0 9 * * * $HOME/.local/bin/paper-status-monitor run --notify none
 ```
 
-or a [systemd user timer](https://wiki.archlinux.org/title/Systemd/Timers). With a
-graphical session you can also create `~/.config/autostart/paper-status-monitor.desktop`:
+or a [systemd user timer](https://wiki.archlinux.org/title/Systemd/Timers) that
+checks at 9:00 and 21:00 (and catches up after the computer was off), in
+`~/.config/systemd/user/paper-status-monitor.service`:
 
 ```ini
-[Desktop Entry]
-Type=Application
-Name=paper-status-monitor
-Exec=paper-status-monitor run --wait 300
-Terminal=false
+[Unit]
+Description=Check the status of your manuscripts (paper-status-monitor)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/paper-status-monitor run --wait 300 --notify none
 ```
 
-Add `--every 12h` to the `Exec` line to keep checking every 12 hours while you stay
-logged in (see {ref}`periodic-checks`).
+and `~/.config/systemd/user/paper-status-monitor.timer`:
+
+```ini
+[Unit]
+Description=Check the status of your manuscripts twice a day
+
+[Timer]
+OnCalendar=*-*-* 09,21:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl --user enable --now paper-status-monitor.timer`, and run
+`loginctl enable-linger $USER` if it must also run while you are not logged in. Use
+`which paper-status-monitor` to find the right path.
 
 ## macOS
 
-Create `~/Library/LaunchAgents/io.github.paper-status-monitor.plist`:
+launchd loads the agent at your next login. macOS 13 and later announce it as a new
+background item, and list it in *System Settings → General → Login Items*, where you
+can also turn it off. To start it now, without logging out (this also runs a check
+immediately):
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>io.github.paper-status-monitor</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/paper-status-monitor</string>
-    <string>run</string>
-    <string>--wait</string>
-    <string>300</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-</dict>
-</plist>
+```console
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.paper-status-monitor.plist
 ```
 
-and load it with `launchctl load ~/Library/LaunchAgents/io.github.paper-status-monitor.plist`.
-Use `which paper-status-monitor` to find the right path. Add `<string>--every</string>`
-and `<string>12h</string>` to `ProgramArguments` to keep checking every 12 hours while
-you stay logged in.
+A loaded agent keeps running until you log out, even after `autostart disable`; to
+stop it earlier, run `launchctl bootout gui/$(id -u)/io.github.paper-status-monitor`.
 
 ## How often should it run?
 

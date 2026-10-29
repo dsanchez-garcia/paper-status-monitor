@@ -36,6 +36,9 @@ folder (Google Drive, OneDrive, Dropbox...) is fine.
 paper-status-monitor init --data-dir "C:\Users\me\Documents\Paper status"
 ```
 
+Add `--language es` to get the reports, notifications and window in Spanish (see
+{ref}`language`).
+
 The file is created in the default location (on Windows,
 `%APPDATA%\paper-status-monitor\config.toml`). See {doc}`configuration` for all the
 settings.
@@ -69,17 +72,17 @@ Report: C:\Users\me\Documents\Paper status\reports\changes_2026-10-21_08-55-12.t
 The first run creates the workbook and a report listing the newly tracked
 submission. Later runs only write a row (and a report) when something changes.
 
-## 5. Check automatically at every login (Windows)
+## 5. Check automatically at every login
 
 ```console
 paper-status-monitor autostart enable
 ```
 
-From now on, the monitor runs in the background (without a console window) every
-time you log in, and the report opens in your text editor when there is news. If
-your computer stays on for days, use `autostart enable --every 12h` to also check
-every 12 hours while you stay logged in. See {doc}`autostart` for details and for
-Linux/macOS.
+From now on, the monitor runs in the background (without a window) every time you
+log in, and the report opens in your text editor when there is news. If your
+computer stays on for days, use `autostart enable --every 12h` to also check every
+12 hours while you stay logged in. It works on Windows, Linux (desktop sessions) and
+macOS; see {doc}`autostart` for the details.
 
 ```{tip}
 Prefer a desktop notification to the report opening by itself? Set
@@ -94,7 +97,7 @@ paper-status-monitor doctor
 ```
 
 `doctor` checks the configuration, the data folder, the connection to the tracker,
-the autostart shortcut and the result of the last run. To see the latest status of
+the autostart launcher and the result of the last run. To see the latest status of
 all your submissions at a glance, use `paper-status-monitor summary`.
 
 ## Prefer a window?

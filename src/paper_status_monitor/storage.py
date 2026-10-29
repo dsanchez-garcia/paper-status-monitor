@@ -14,6 +14,10 @@ The name is built from the ``workbook_name`` template (see
 for example all the submissions of one paper to different journals. Workbooks are
 found again by their content (see :class:`WorkbookStore`), never by the title, so a
 later change of the title or of the template does not split a history.
+
+The history is kept in the ``History`` sheet. With the ``time_in_status`` setting,
+a second sheet, ``Time in status``, shows how long each submission spent in each
+status (see :func:`write_time_sheet`).
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -33,6 +37,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from paper_status_monitor import timeline
 from paper_status_monitor.models import (
     COLUMNS,
     DETECTED_AT_COLUMN,
@@ -48,8 +53,22 @@ log = logging.getLogger(__name__)
 #: Name of the worksheet that holds the history.
 SHEET_TITLE = "History"
 
+#: Name of the optional worksheet with the time spent in each status
+#: (``time_in_status`` setting). It is rewritten after every change.
+TIME_SHEET_TITLE = "Time in status"
+
 #: Maximum length of a workbook file name without the extension.
 MAX_STEM_LENGTH = 150
+
+_TIME_SHEET_MARK = "Written by paper-status-monitor"
+_TIME_SHEET_NOTE = (
+    f"{_TIME_SHEET_MARK} after every change of the History sheet: do not edit this sheet, "
+    "your changes would be lost. The days of the current status are counted until now."
+)
+_PERIOD_HEADINGS = ("Manuscript number", "Journal", "Revision", "Status", "From", "To", "Days")
+_TOTAL_HEADINGS = ("Manuscript number", "Journal", "Status", "Days", "Periods")
+_TIME_SHEET_WIDTHS = (20, 32, 10, 30, 18, 18, 10)
+_DATE_TIME_FORMAT = "yyyy-mm-dd hh:mm"
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _HEADER_FONT = Font(bold=True)
@@ -224,6 +243,7 @@ class WorkbookStore:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self._cache: dict[Path, tuple[tuple[int, int], list[dict[str, str]]]] = {}
+        self._sheets: dict[Path, tuple[tuple[int, int], list[str]]] = {}
 
     def workbooks(self) -> list[Path]:
         """Return the workbooks of the folder (temporary and lock files excluded)."""
@@ -239,6 +259,21 @@ class WorkbookStore:
         records = read_records(path)
         self._cache[path] = (signature, records)
         return records
+
+    def sheet_names(self, path: Path) -> list[str]:
+        """Return the names of the sheets of a workbook (read once while it does not change)."""
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = self._sheets.get(path)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        workbook = load_workbook(path, read_only=True)
+        try:
+            names = list(workbook.sheetnames)
+        finally:
+            workbook.close()
+        self._sheets[path] = (signature, names)
+        return names
 
     def submission_records(self, path: Path, key: str, uuid: str = "") -> list[dict[str, str]]:
         """Return the rows of *path* that belong to a submission, in file order.
@@ -328,18 +363,35 @@ class WorkbookStore:
             return None
         return found[_most_recent(list(found), uuid)]
 
-    def append(self, path: Path, record: Mapping[str, Any]) -> None:
+    def append(
+        self, path: Path, record: Mapping[str, Any], *, time_in_status: bool = False
+    ) -> None:
         """Append a row (see :func:`append_record`) and forget the cached rows."""
-        self._cache.pop(path, None)
-        append_record(path, record)
-        self._cache.pop(path, None)
+        self.forget(path)
+        append_record(path, record, time_in_status=time_in_status)
+        self.forget(path)
+
+    def add_time_sheet(self, path: Path) -> bool:
+        """Add the *Time in status* sheet to an existing workbook that does not have it.
+
+        Returns:
+            ``True`` if the sheet was added.
+        """
+        if TIME_SHEET_TITLE in self.sheet_names(path):
+            return False
+        self.forget(path)
+        added = write_time_sheet(path)
+        self.forget(path)
+        return added
 
     def forget(self, path: Path | None = None) -> None:
         """Drop the cached rows of *path* (of every workbook if ``None``)."""
         if path is None:
             self._cache.clear()
+            self._sheets.clear()
         else:
             self._cache.pop(path, None)
+            self._sheets.pop(path, None)
 
     def _safe_records(self, path: Path) -> list[dict[str, str]]:
         try:
@@ -350,9 +402,12 @@ class WorkbookStore:
 
 
 def _history_sheet(workbook: Workbook) -> Worksheet:
+    """Return the history sheet: ``History``, else the first sheet that is not the
+    *Time in status* sheet."""
     if SHEET_TITLE in workbook.sheetnames:
         return workbook[SHEET_TITLE]
-    return workbook.worksheets[0]
+    others = [sheet for sheet in workbook.worksheets if sheet.title != TIME_SHEET_TITLE]
+    return (others or workbook.worksheets)[0]
 
 
 def read_records(path: Path) -> list[dict[str, str]]:
@@ -382,12 +437,18 @@ def last_record(path: Path) -> dict[str, str] | None:
     return records[-1] if records else None
 
 
-def append_record(path: Path, record: Mapping[str, Any]) -> None:
+def append_record(path: Path, record: Mapping[str, Any], *, time_in_status: bool = False) -> None:
     """Append one row to the workbook at *path*, creating the file if needed.
 
     Values are written under the matching header. Columns missing from an older
     workbook are added at the end of the header, so files written by previous
     versions keep working. The file is replaced atomically.
+
+    Args:
+        path: The workbook.
+        record: Column label to value.
+        time_in_status: Add the *Time in status* sheet (see :func:`write_time_sheet`).
+            An existing one is always brought up to date.
 
     Raises:
         WorkbookLockedError: If the file cannot be replaced (e.g. open in Excel).
@@ -404,12 +465,14 @@ def append_record(path: Path, record: Mapping[str, Any]) -> None:
         row = _last_used_row(sheet) + 1
         _write_row(sheet, row, header, record)
         _finish_sheet(sheet, header, row)
+        if time_in_status or TIME_SHEET_TITLE in workbook.sheetnames:
+            _write_time_sheet(workbook, sheet, path.name)
         _save_atomic(workbook, path)
     finally:
         workbook.close()
 
 
-def merge_workbooks(target: Path, sources: Sequence[Path]) -> int:
+def merge_workbooks(target: Path, sources: Sequence[Path], *, time_in_status: bool = False) -> int:
     """Combine the history of several workbooks into *target*.
 
     The rows of *target* (if it exists) and of every source are merged in
@@ -418,6 +481,12 @@ def merge_workbooks(target: Path, sources: Sequence[Path]) -> int:
     column is kept. *target* is used as the base when it exists (its other sheets
     and column widths are preserved); otherwise the first source is. The sources
     are **not** deleted.
+
+    Args:
+        target: The merged workbook.
+        sources: Workbooks whose rows are added.
+        time_in_status: Add the *Time in status* sheet; an existing one is always
+            rewritten from the merged rows.
 
     Returns:
         The number of data rows written.
@@ -441,10 +510,187 @@ def merge_workbooks(target: Path, sources: Sequence[Path]) -> int:
         for index, record in enumerate(rows, start=2):
             _write_row(sheet, index, header, record)
         _finish_sheet(sheet, header, len(rows) + 1)
+        if time_in_status or TIME_SHEET_TITLE in workbook.sheetnames:
+            _write_time_sheet(workbook, sheet, target.name)
         _save_atomic(workbook, target)
     finally:
         workbook.close()
     return len(rows)
+
+
+def copy_rows(
+    source: Path,
+    target: Path,
+    keep: Callable[[Mapping[str, str]], bool],
+    *,
+    time_in_status: bool = False,
+) -> int:
+    """Write the rows of *source* that *keep* accepts to *target*.
+
+    *keep* receives every row as text (like the rows of :func:`read_records`).
+
+    * When *target* is *source*, the other rows are removed from it.
+    * When *target* is another existing workbook, the rows are merged into it in
+      chronological order, as :func:`merge_workbooks` does.
+    * Otherwise *target* is created from a copy of *source*, so that its formatting
+      and its other sheets are kept, with only those rows.
+
+    *source* is only modified when it is *target*.
+
+    Returns:
+        The number of rows of *source* written to *target*.
+
+    Raises:
+        WorkbookLockedError: If *target* cannot be written.
+    """
+    labels, rows = _read_table(source)
+    selected = [
+        row for row in rows if keep({label: cell_to_text(value) for label, value in row.items()})
+    ]
+    merging = target.exists() and target != source and not _same_file(source, target)
+    workbook = load_workbook(target if merging else source)
+    try:
+        sheet = _history_sheet(workbook)
+        records = selected
+        if merging:
+            existing_labels, existing = _sheet_table(sheet)
+            records = _chronological([existing, selected])
+            labels = [*existing_labels, *labels]
+        if sheet.max_row > 1:
+            sheet.delete_rows(2, sheet.max_row - 1)
+        header = _ensure_header(sheet, [*COLUMNS, *labels])
+        for index, record in enumerate(records, start=2):
+            _write_row(sheet, index, header, record)
+        _finish_sheet(sheet, header, len(records) + 1)
+        if time_in_status or TIME_SHEET_TITLE in workbook.sheetnames:
+            _write_time_sheet(workbook, sheet, target.name)
+        _save_atomic(workbook, target)
+    finally:
+        workbook.close()
+    return len(selected)
+
+
+def ensure_writable(paths: Iterable[Path]) -> None:
+    """Make sure that the existing workbooks among *paths* can be replaced.
+
+    Raises:
+        WorkbookLockedError: For the first one that is in use (typically, open in Excel).
+    """
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r+b"):
+                pass
+        except PermissionError as exc:
+            raise WorkbookLockedError(
+                f"Cannot write {path.name}: the file is in use. Is it open in Excel?"
+            ) from exc
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+def write_time_sheet(path: Path) -> bool:
+    """Write (or rewrite) the *Time in status* sheet of an existing workbook.
+
+    The sheet lists, for every submission of the workbook, the periods during which
+    it kept the same status and revision (from, to and days) and the total days in
+    each status (see :mod:`~paper_status_monitor.timeline`). The days of the
+    current status are an Excel formula (``NOW()``), so they stay up to date
+    without rewriting the workbook. The history is not modified.
+
+    Returns:
+        ``False`` if the workbook already has a sheet with that name that was not
+        written by this program: it is left untouched.
+
+    Raises:
+        WorkbookLockedError: If the file cannot be replaced (e.g. open in Excel).
+    """
+    workbook = load_workbook(path)
+    try:
+        if not _write_time_sheet(workbook, _history_sheet(workbook), path.name):
+            return False
+        _save_atomic(workbook, path)
+    finally:
+        workbook.close()
+    return True
+
+
+def _write_time_sheet(workbook: Workbook, history: Worksheet, name: str = "") -> bool:
+    """Build the *Time in status* sheet from the rows of *history*.
+
+    See :func:`write_time_sheet`; *name* identifies the workbook in log messages.
+    """
+    position = None
+    if TIME_SHEET_TITLE in workbook.sheetnames:
+        existing = workbook[TIME_SHEET_TITLE]
+        if not str(existing.cell(2, 1).value or "").startswith(_TIME_SHEET_MARK):
+            log.warning(
+                "%s has a sheet named %r that was not written by paper-status-monitor; it "
+                "is left as it is. Rename it to get the time spent in each status.",
+                name or "A workbook",
+                TIME_SHEET_TITLE,
+            )
+            return False
+        position = workbook.sheetnames.index(TIME_SHEET_TITLE)
+        workbook.remove(existing)
+    sheet = workbook.create_sheet(TIME_SHEET_TITLE, position)
+    sheet.cell(1, 1, "Time in each status").font = Font(bold=True, size=14)
+    sheet.cell(2, 1, _TIME_SHEET_NOTE).font = Font(italic=True, color="5F6368")
+    for column, width in enumerate(_TIME_SHEET_WIDTHS, start=1):
+        sheet.column_dimensions[get_column_letter(column)].width = width
+    periods = timeline.status_periods(_sheet_table(history)[1])
+    if not periods:
+        sheet.cell(4, 1, "No dated rows yet.")
+        return True
+    first = 5
+    last = first + len(periods) - 1
+    _heading_row(sheet, first - 1, _PERIOD_HEADINGS)
+    for row, period in enumerate(periods, start=first):
+        sheet.cell(row, 1, period.submission)
+        sheet.cell(row, 2, period.journal)
+        sheet.cell(row, 3, _to_cell("Revision", period.revision))
+        sheet.cell(row, 4, period.status)
+        sheet.cell(row, 5, period.start).number_format = _DATE_TIME_FORMAT
+        if period.end is not None:
+            sheet.cell(row, 6, period.end).number_format = _DATE_TIME_FORMAT
+        elif not period.final:
+            sheet.cell(row, 6, "now")
+        days = period.days()
+        if period.ongoing:
+            sheet.cell(row, 7, f"=ROUND(NOW()-E{row},1)").number_format = "0.0"
+        elif days is not None:
+            sheet.cell(row, 7, round(days, 1)).number_format = "0.0"
+    title = last + 2
+    sheet.cell(title, 1, "Total days in each status").font = Font(bold=True)
+    _heading_row(sheet, title + 1, _TOTAL_HEADINGS)
+
+    def span(column: str) -> str:
+        return f"${column}${first}:${column}${last}"
+
+    totals = timeline.total_days(periods)
+    journals = {period.submission: period.journal for period in periods}
+    for row, (submission, status) in enumerate(totals, start=title + 2):
+        sheet.cell(row, 1, submission)
+        sheet.cell(row, 2, journals.get(submission, ""))
+        sheet.cell(row, 3, status)
+        criteria = f"{span('A')},A{row},{span('D')},C{row}"
+        sheet.cell(row, 4, f"=SUMIFS({span('G')},{criteria})").number_format = "0.0"
+        sheet.cell(row, 5, f"=COUNTIFS({criteria})")
+    return True
+
+
+def _heading_row(sheet: Worksheet, row: int, headings: Sequence[str]) -> None:
+    for column, heading in enumerate(headings, start=1):
+        cell = sheet.cell(row, column, heading)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _HEADER_ALIGNMENT
 
 
 def _read_table(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
@@ -473,25 +719,12 @@ def _chronological(tables: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     for table_index, rows in enumerate(tables):
         latest = datetime.min
         for row_index, row in enumerate(rows):
-            moment = _as_datetime(row.get(DETECTED_AT_COLUMN))
+            moment = timeline.as_datetime(row.get(DETECTED_AT_COLUMN))
             if moment is not None and moment > latest:
                 latest = moment
             keyed.append(((latest, table_index, row_index), row))
     keyed.sort(key=lambda item: item[0])
     return [row for _, row in keyed]
-
-
-def _as_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
-    if isinstance(value, date):
-        return datetime(value.year, value.month, value.day)
-    if isinstance(value, str) and value.strip():
-        try:
-            return datetime.fromisoformat(value.strip()).replace(tzinfo=None)
-        except ValueError:
-            return None
-    return None
 
 
 def _ensure_header(sheet: Worksheet, labels: list[str]) -> list[str]:

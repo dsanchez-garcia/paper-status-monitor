@@ -5,8 +5,12 @@ architecture, the domain rules, the commands to run and the privacy rules.
 
 Most important points:
 
-- Everything in English. Python ≥ 3.10, type hints, Ruff (line length 100),
-  Google-style docstrings.
+- Everything in English (except the translation catalogs in `locales/`). Python ≥ 3.10,
+  type hints, Ruff (line length 100), Google-style docstrings.
+- Texts of reports, notifications, e-mails, the summary and the GUI go through
+  `i18n._()` / `ngettext()` with named placeholders; add their Spanish translation to
+  `locales/es.py` (`tests/test_i18n.py` checks it). Workbooks, exports and the CLI stay
+  in English.
 - Before finishing: `python -m pytest`, `ruff check .`, `ruff format --check .` and
   `sphinx-build -W --keep-going -b html docs docs/_build/html` must pass.
 - Tests never use the network (use the `fake_client` and `make_payload` fixtures).

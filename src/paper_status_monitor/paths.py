@@ -68,6 +68,11 @@ def lock_file_path() -> Path:
     return user_state_dir() / "run.lock"
 
 
+def loop_lock_path() -> Path:
+    """Return the path of the lock file held while periodic checks run (``run --every``)."""
+    return user_state_dir() / "periodic.lock"
+
+
 def fallback_reports_dir() -> Path:
     """Return the folder used for reports when the data folder is not available."""
     return user_state_dir() / "reports"

@@ -60,23 +60,31 @@ src/paper_status_monitor/
 ├── __init__.py     public API (re-exports)
 ├── __main__.py     python -m paper_status_monitor
 ├── _version.py     single source of the version number
-├── cli.py          argparse CLI: init, add, remove, enable, disable, list, summary,
-│                   check, run, organize, gui, autostart, doctor
+├── cli.py          argparse CLI: init, add, edit, remove, enable, disable, list,
+│                   summary, check, run, organize, gui, autostart, doctor
 ├── client.py       HTTP client for the tracker JSON endpoint, UUID parsing, errors
 ├── models.py       Snapshot (display values), Change, diff, status/date formatting
 ├── naming.py       workbook_name templates: placeholders, custom fields, file names
 ├── storage.py      Excel workbooks: lookup by content, reading, atomic appends, merging
+├── timeline.py     periods of time in each status (the "Time in status" sheet)
 ├── monitor.py      orchestration: fetch -> compare -> record / notify, wait for readiness
-├── organize.py     rename and merge existing workbooks to follow the template
+├── organize.py     rename, merge and split existing workbooks to follow the template
 ├── report.py       console summary, text report, publishing (open it, notify)
 ├── notifications.py desktop notifications: Windows toasts, osascript, notify-send
+├── emails.py       e-mail notifications through SMTP; password from the environment or keyring
 ├── scheduling.py   periodic checks (run --every): intervals and the wall-clock loop
+├── tray.py         icon in the notification area during periodic checks: texts, menu
+├── _tray_win32.py  Windows code of that icon (ctypes; imported lazily)
 ├── summary.py      one table with the latest status of every submission
-├── config.py       TOML configuration: loading, validation, writing, adding
+├── export.py       the recorded history as CSV or JSON
+├── config.py       TOML configuration: loading, validation, writing, editing in place
 ├── state.py        last-run summary, single-instance lock, last state seen per submission
+├── i18n.py         translations: gettext/ngettext, process and thread languages
+├── locales/        one catalog per language (es.py: Spanish)
 ├── gui.py          graphical interface: entry points and widget-free logic
 ├── _gui_app.py     tkinter widgets of the graphical interface (imported lazily)
-├── autostart.py    Windows Startup shortcut (created through PowerShell/WScript)
+├── autostart.py    launchers at login: Windows Startup shortcut (through PowerShell),
+│                   XDG autostart entry (Linux), launchd agent (macOS)
 ├── _powershell.py  runs Windows PowerShell scripts without a console window
 └── paths.py        per-user folders for configuration, logs and state
 tests/              pytest suite (one file per module) + fixtures in conftest.py
@@ -108,7 +116,8 @@ Key design decisions:
   history; rows are matched by base manuscript number or tracking link, never by
   title. The `workbook_name` template only names *new* workbooks, and several
   submissions may share one; existing histories are found by content and never
-  split (`organize` renames and merges them on request).
+  split (`organize` renames, merges or splits workbooks on request, always moving
+  whole histories).
 - **Record and notify are independent.** Rows are added from the comparison with the
   last row of the submission; reports come from the comparison with the last state
   seen (`.paper-status-monitor.json` in the data folder), so a change that is
@@ -128,6 +137,12 @@ Key design decisions:
 - **The GUI is a thin layer.** `gui.py` holds the logic that does not need a display
   (and is tested everywhere); `_gui_app.py` only builds tkinter widgets and calls the
   same functions as the CLI. Tk tests are skipped where no display is available.
+- **Data in English, documents in the user's language.** The workbooks, exports,
+  configuration and command line stay in English; reports, notifications,
+  e-mails, summaries and the window follow the `language` setting. Documents are
+  rendered inside `with i18n.language(config.language):`, which only affects the
+  current thread, so the command line stays in English and a check running in the
+  background never changes the window.
 
 ## Coding conventions
 
@@ -135,10 +150,41 @@ Key design decisions:
 - Formatting and linting with Ruff (line length 100); configuration in
   `pyproject.toml`.
 - Google-style docstrings for public functions and classes (they feed the API page).
-- Everything in English: code, comments, messages, documentation.
+- Everything in English: code, comments, messages, documentation. The only
+  exception are the translation catalogs in `src/paper_status_monitor/locales/`.
 - Keep runtime dependencies minimal (`requests`, `openpyxl`, `tomli` on 3.10). The
   graphical interface uses `tkinter` from the standard library only.
 - User-facing messages must say what happened **and** what to do next.
+
+## Translations
+
+The texts of the reports, notifications, e-mails, summaries and the window are
+written in English in the code and wrapped for translation (see
+{mod}`paper_status_monitor.i18n`):
+
+```python
+from paper_status_monitor.i18n import N_, _, column_label, ngettext
+
+title = _("Status changed: {name}").format(name=name)  # placeholders by name
+line = ngettext("{count} new", "{count} new", count).format(count=count)
+HEADINGS = (N_("Submission"), N_("Journal"))  # constants: translated when shown
+label = column_label("Last review activity")  # workbook columns, never custom fields
+```
+
+- Use named `{placeholders}` and `str.format`, never f-strings inside `_()`, so that
+  translations can reorder them; the message must be a literal string.
+- Do not translate data: column names in the workbooks, values from the tracker,
+  exports and error messages of the lower layers stay in English, and log messages
+  are never wrapped in `_()`.
+- Do not use `_` as a throwaway variable in modules that translate texts.
+
+Each language is a module in `src/paper_status_monitor/locales/` (`es.py`): a
+`MESSAGES` dictionary from the English text to its translation (a tuple of forms
+for plural messages) and a `plural` function. `tests/test_i18n.py` extracts every
+message from the code and fails if a catalog lacks a translation, keeps an unused
+one, or changes the placeholders or line breaks. When you change a message, update
+the catalogs in the same commit. To add a language, follow the instructions at the
+top of `locales/__init__.py` and add it to `i18n.LANGUAGES`.
 
 ## Privacy rules
 

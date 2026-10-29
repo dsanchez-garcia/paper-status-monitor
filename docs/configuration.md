@@ -22,7 +22,7 @@ You can use another file with the global `--config PATH` option
 # Folder where the Excel workbooks and the change reports are stored.
 data_dir = 'C:\Users\me\Documents\Paper status'
 
-# One workbook per paper and journal, sorted by paper: "TMY - Energy - ENB-D-26-00001.xlsx"
+# One workbook per paper and journal, sorted by paper: "Tau - Journal of Examples - ABC-D-26-00001.xlsx"
 workbook_name = "{paper} - {journal} - {manuscript_number}"
 
 # Record every change, but do not open a report when only the date of the last
@@ -37,15 +37,18 @@ notify = ["report", "toast"]
 notify_on_errors = true
 request_timeout = 30
 
+# Reports, notifications, e-mails, summary and window in Spanish.
+language = "es"
+
 [[submissions]]
 url = "https://track.authorhub.elsevier.com/?uuid=00000000-0000-0000-0000-000000000000"
 label = "Demo submission"
-fields = { paper = "TMY" }
+fields = { paper = "Tau" }
 
 [[submissions]]
 uuid = "11111111-2222-3333-4444-555555555555"
 label = "Paper under revision"
-fields = { paper = "Comfort" }
+fields = { paper = "Epsilon" }
 enabled = false
 ```
 
@@ -71,13 +74,19 @@ submission. Keep the general settings at the top of the file.
 : Template for the names of the workbooks; see [Workbook names](#workbook-names)
   below.
 
-`notify` (`"report"`, `"toast"`, `"none"` or a list, default `"report"`)
+`time_in_status` (boolean, default `false`)
+: Add a *Time in status* sheet to every workbook, with the periods that each
+  submission spent in each status and the total days in each one (see
+  {doc}`workbooks`). It is added at the next run and rewritten after every change.
+
+`notify` (`"report"`, `"toast"`, `"email"`, `"none"` or a list, default `"report"`)
 : How you are told about news (changes, new submissions and, with
   `notify_on_errors`, failed checks). A report is always written to the `reports`
   subfolder of `data_dir`; `"report"` also opens it with the default application
-  for `.txt` files, and `"toast"` shows a desktop notification (see
-  [Desktop notifications](#desktop-notifications)). Use a list for both,
-  `["report", "toast"]`, or `"none"` to only write the report. `open_report`, the
+  for `.txt` files, `"toast"` shows a desktop notification (see
+  [Desktop notifications](#desktop-notifications)) and `"email"` sends it by e-mail
+  (see [E-mail notifications](#e-mail-notifications)). Use a list for several, such
+  as `["report", "toast"]`, or `"none"` to only write the report. `open_report`, the
   setting used by version 0.1, is still accepted: `open_report = true` means
   `notify = "report"` and `false` means `notify = "none"`.
 
@@ -89,6 +98,36 @@ submission. Keep the general settings at the top of the file.
 `request_timeout` (number, default `30`)
 : Seconds to wait for each answer from the tracker. Failed requests are retried
   three times with an increasing delay.
+
+`language` (`"en"` or `"es"`, default `"en"`)
+: Language of the reports, the desktop notifications, the e-mails, the summary and
+  the graphical interface: `"en"` (English) or `"es"` (Spanish, *español*). See
+  [Language](#language).
+
+(language)=
+## Language
+
+With `language = "es"`, everything that paper-status-monitor writes for you to
+read is in Spanish: the change reports, the desktop notifications (and their
+buttons), the e-mails, the summary (`paper-status-monitor summary` and the
+*Summary* button) and the whole graphical interface, where the language can also
+be chosen at the bottom of the window. `paper-status-monitor init --language es`
+writes the setting for you.
+
+Some things always stay in English, so that they work the same in every language:
+
+- the workbooks: their column names (`Status`, `Last review activity`...) and the
+  *Time in status* sheet, which programs and the history rely on;
+- the values shown by the tracking page, such as `Under Review` or `17th May 2022`,
+  which are written as the page shows them;
+- the exports (`export`) and the configuration file;
+- the command line: its help and messages, including the summary of a run printed
+  by `run` (the report it writes follows the setting);
+- the error messages that come from the tracker, the SMTP server or the
+  configuration file.
+
+Translations live in `src/paper_status_monitor/locales/`; see {doc}`development` to
+add a language.
 
 (record-and-notify)=
 ## What is recorded and what is notified
@@ -133,7 +172,33 @@ with `notify_on_errors`, failed checks are always reported.
 
 The same choices can be made for a single run with the `run` options
 `--record-fields`, `--record-ignore`, `--notify-fields` and `--notify-ignore` (see
-{doc}`cli`).
+{doc}`cli`); for that run, they also replace the own settings of the submissions
+described below.
+
+(own-settings)=
+### Different choices for one submission
+
+A submission can have its own `record_fields`, `record_ignore`, `notify_fields` or
+`notify_ignore`, written in its `[[submissions]]` table. Each one replaces the general
+setting of the same name for that submission only, while the other general settings
+still apply to it:
+
+```toml
+notify_ignore = ["Last review activity"]   # every submission
+
+[[submissions]]
+url = "https://track.authorhub.elsevier.com/?uuid=00000000-0000-0000-0000-000000000000"
+label = "Paper under revision"
+notify_fields = ["Status"]                 # this one: only changes of status
+record_ignore = []                         # and every change adds a row
+```
+
+Write `notify_ignore = []` in a submission to drop the general list for it.
+`paper-status-monitor list` shows what is recorded and notified for every submission
+that has its own settings. You can set them with `paper-status-monitor edit SUBMISSION
+--notify-fields Status` (the same options as `run`; `general` removes one, and
+`--use-general-settings` removes them all) or in the graphical interface (*Edit...*,
+then *What is recorded and notified*).
 
 (desktop-notifications)=
 ## Desktop notifications
@@ -144,7 +209,7 @@ Required Reviews Complete`), or one line per submission when several have news.
 
 | System | How it is shown |
 | --- | --- |
-| Windows 10 and 11 | A toast notification, shown on behalf of *Windows PowerShell* (no extra software). Clicking it opens the report. |
+| Windows 10 and 11 | A toast notification, shown on behalf of *Windows PowerShell* (no extra software). Clicking it opens the report, and its buttons open the report, the workbook and the tracking page (when several submissions have news: the report and their workbook, or the folder of the workbooks). |
 | macOS | *display notification*, through `osascript`. |
 | Linux | `notify-send`, from the `libnotify-bin` package (Debian, Ubuntu) or `libnotify`. |
 
@@ -153,6 +218,50 @@ report is still written. Use *Test*, next to the option in the graphical interfa
 to check that your system displays them, and `paper-status-monitor doctor` to check
 that the required program is installed. Focus assist or *do not disturb* modes may
 hide them; they then wait in the notification centre.
+
+(e-mail-notifications)=
+## E-mail notifications
+
+With `notify = "email"` (or a list such as `["report", "email"]`), the report of
+every run with news is also sent by e-mail, through your SMTP server:
+
+```toml
+notify = ["report", "email"]
+
+[email]
+smtp_host = "smtp.example.org"
+security = "starttls"         # "starttls" (port 587, default), "ssl" (465) or "none" (25)
+smtp_port = 587               # optional: only if the server uses another port
+username = "me@example.org"   # leave it out if the server needs no login
+sender = "me@example.org"     # optional: the From address (default: username)
+to = ["me@example.org"]       # one address or a list
+```
+
+Write the `[email]` table after the general settings: every setting below an
+`[email]` line belongs to it.
+
+**The password is never written to the configuration file**, and a `password`
+setting is refused. Give it in one of these ways:
+
+- the `PAPER_STATUS_MONITOR_SMTP_PASSWORD` environment variable, or
+- the system keyring (Windows Credential Manager, macOS Keychain, Secret Service on
+  Linux), with the optional `keyring` package:
+
+  ```console
+  python -m pip install "paper-status-monitor[keyring]"
+  paper-status-monitor email set-password
+  ```
+
+Then check everything with `paper-status-monitor email test`, which sends a test
+message; `doctor` warns when a setting or the password is missing. Many providers
+(Gmail, Outlook.com, Yahoo...) do not accept your usual password from programs:
+create an *app password* in the security settings of your account and use it
+instead.
+
+The message contains the report, including the tracking links of the submissions
+with news: send it only to yourself or to people you trust. Like desktop
+notifications, e-mails are best effort: when one cannot be sent, the problem is
+logged and the report is still written.
 
 ## Workbook names
 
@@ -178,10 +287,10 @@ separator next to it. Some useful templates:
 
 | Template | Example |
 | --- | --- |
-| `{manuscript_number} - {journal} - {title}` (default) | `ENB-D-26-00001 - Energy and Buildings - A study.xlsx` |
-| `{paper} - {journal} - {manuscript_number}` | `TMY - Energy and Buildings - ENB-D-26-00001.xlsx` |
-| `{paper} - {date_of_submission} - {journal_acronym}` | `TMY - 2026-03-03 - ENB.xlsx` |
-| `{paper}` | `TMY.xlsx`: **one workbook per paper**, with every journal it was sent to |
+| `{manuscript_number} - {journal} - {title}` (default) | `ABC-D-26-00001 - Journal of Examples - A study.xlsx` |
+| `{paper} - {journal} - {manuscript_number}` | `Tau - Journal of Examples - ABC-D-26-00001.xlsx` |
+| `{paper} - {date_of_submission} - {journal_acronym}` | `Tau - 2026-03-03 - ABC.xlsx` |
+| `{paper}` | `Tau.xlsx`: **one workbook per paper**, with every journal it was sent to |
 
 Submissions whose names coincide share a workbook. With `"{paper}"`, all the
 submissions of a paper (for example, after a rejection, to the next journal) are
@@ -190,8 +299,8 @@ recorded in the same workbook, one row per observed state; the `Journal` and
 template to group submissions in this way.
 
 The template only decides the name of a workbook when a submission is recorded for
-the first time: an existing history is never split. To rename or merge existing
-workbooks after changing the template, run `paper-status-monitor organize` (see
+the first time: an existing history is never split. To rename, merge or split
+existing workbooks after changing the template, run `paper-status-monitor organize` (see
 {doc}`workbooks`).
 
 ## Submissions
@@ -206,7 +315,7 @@ Each manuscript is a `[[submissions]]` table:
 : A short name shown by `list` and in the reports.
 
 `fields` (table, optional)
-: Your own fields, for example `fields = { paper = "TMY", project = "Thesis" }`.
+: Your own fields, for example `fields = { paper = "Tau", project = "Thesis" }`.
   Each field can be used as a placeholder in `workbook_name` and is written to an
   extra column of the workbook, named after the field (`paper` → `Paper`,
   `funding_agency` → `Funding agency`). Names use letters, digits and underscores
@@ -216,10 +325,15 @@ Each manuscript is a `[[submissions]]` table:
 `enabled` (boolean, default `true`)
 : Set to `false` to pause monitoring without deleting the entry.
 
+`record_fields`, `record_ignore`, `notify_fields`, `notify_ignore` (optional)
+: Own choice of what is recorded and notified for this submission; each one replaces
+  the general setting of the same name (see {ref}`own-settings`).
+
 To add submissions, use `paper-status-monitor add LINK [--label TEXT] [--field
 NAME=VALUE]` (it validates the link and keeps your comments), the graphical
-interface, or edit the file. To pause, resume or remove one, use
-`paper-status-monitor disable`, `enable` or `remove` (they keep your comments too;
+interface, or edit the file. To change the label or the custom fields of one, use
+`paper-status-monitor edit`; to pause, resume or remove one, use
+`paper-status-monitor disable`, `enable` or `remove` (they all keep your comments;
 see {doc}`cli`), the graphical interface, or edit the file (`enabled = false`
 pauses a submission).
 
@@ -233,8 +347,8 @@ as `{paper}` is only valid if at least one submission has that field.
 validate the file.
 
 ```{note}
-The `add`, `remove`, `disable` and `enable` commands edit the file in place and keep
-your comments. Saving from the graphical interface rewrites the file with
-explanatory comments, so comments you added by hand are lost. `remove`, `disable`,
-`enable` and the window keep the previous file as `config.toml.bak`.
+The `add`, `edit`, `remove`, `disable` and `enable` commands edit the file in place
+and keep your comments. Saving from the graphical interface rewrites the file with
+explanatory comments, so comments you added by hand are lost. `edit`, `remove`,
+`disable`, `enable` and the window keep the previous file as `config.toml.bak`.
 ```

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -36,7 +37,7 @@ _SEEN_NOTE = (
 
 
 class AlreadyRunningError(RuntimeError):
-    """Another run is in progress (the lock file exists and is recent)."""
+    """Another run, or another loop of periodic checks, is in progress."""
 
 
 @contextmanager
@@ -73,6 +74,99 @@ def single_instance(
         yield
     finally:
         lock.unlink(missing_ok=True)
+
+
+# Offset of the byte locked by periodic checks on Windows: beyond the text of the
+# file, which other processes must still be able to read.
+_LOOP_LOCK_OFFSET = 1 << 20
+
+
+@contextmanager
+def periodic_checks_lock(lock_path: Path | None = None) -> Iterator[None]:
+    """Make sure that only one loop of periodic checks (``run --every``) runs at a time.
+
+    The lock is held by the operating system for as long as the ``with`` block runs,
+    and released when the process ends, even if it crashes, so it never goes stale.
+    The file says which process holds it.
+
+    Raises:
+        AlreadyRunningError: If another process runs periodic checks.
+    """
+    lock = lock_path or paths.loop_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+b") as handle:
+        if not _try_lock(handle):
+            holder = _read_holder(lock)
+            raise AlreadyRunningError(
+                f"Periodic checks are already running{holder}, for example the ones started "
+                "at login. Stop that process first, or check once with: paper-status-monitor run"
+            )
+        try:
+            handle.seek(0)
+            handle.truncate()
+            stamp = datetime.now().isoformat(sep=" ", timespec="seconds")
+            handle.write(f"{os.getpid()} {stamp}\n".encode("ascii"))
+            handle.flush()
+            yield
+        finally:
+            _unlock(handle)
+
+
+def periodic_checks_holder(lock_path: Path | None = None) -> str | None:
+    """Describe the process that runs periodic checks, or return ``None`` if none does."""
+    lock = lock_path or paths.loop_lock_path()
+    if not lock.exists():
+        return None
+    try:
+        with lock.open("a+b") as handle:
+            if _try_lock(handle):
+                _unlock(handle)
+                return None
+    except OSError:
+        return None
+    return _read_holder(lock).strip() or "in another process"
+
+
+def _try_lock(handle: Any) -> bool:
+    """Take an exclusive, non-blocking lock on an open file; ``False`` if it is taken."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(_LOOP_LOCK_OFFSET)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle: Any) -> None:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(_LOOP_LOCK_OFFSET)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:  # the lock goes away with the file anyway
+        log.debug("Could not release the lock of the periodic checks", exc_info=True)
+
+
+def _read_holder(lock: Path) -> str:
+    try:
+        pid, _, since = lock.read_text(encoding="ascii", errors="replace").strip().partition(" ")
+    except OSError:
+        return ""
+    if not pid.isdigit():
+        return ""
+    return f" in process {pid}" + (f" (since {since})" if since else "")
 
 
 def save_last_run(summary: RunSummary, path: Path | None = None) -> Path:

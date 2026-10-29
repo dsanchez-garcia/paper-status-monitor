@@ -12,37 +12,49 @@ to *Done* (with the version) when it is merged. Keep items small and testable.
 
 ## Later (medium priority)
 
-- [ ] `edit` command to change the label or the custom fields of a submission in
-      place, keeping the comments (like `remove`, `enable` and `disable`).
-- [ ] Optional e-mail notifications through SMTP. Credentials must come from
-      environment variables or the OS keyring, never from files in the repository.
-- [ ] Native autostart for Linux (XDG autostart / systemd user timer) and macOS
-      (LaunchAgent) in `autostart.py`, with tests for the generated files. They can
-      start `run --wait 300 --every 12h` at login, like the Windows shortcut.
-- [ ] Document the meaning of internal status codes (`Status code` column) as they
-      are observed, e.g. in `docs/how-it-works.md`.
-- [ ] Optional "Summary" sheet in each workbook with the time spent in each status.
-- [ ] Per-submission `record_*` / `notify_*` overrides (today they apply to every
-      submission).
-- [ ] `organize`: split a workbook whose submissions now map to different names
-      (today it is reported and left untouched).
+- [ ] Complete the table of status codes in `docs/how-it-works.md` (*Statuses
+      observed in practice*) as codes are recorded, always anonymised. Only 3 has
+      been recorded so far; still unknown: the codes behind *Review Complete* (after
+      the reviews, and when a revision has just reached the tracker) and whether
+      revisions under review use 3 or 23.
 
 ## Ideas (low priority)
 
 - [ ] Support other editorial systems (ScholarOne, Editorial Manager, MDPI
-      SuSy...) through a pluggable backend interface (`Backend.fetch(uuid) ->
-      Snapshot`).
-- [ ] Export the history to CSV/JSON for people who do not use Excel.
-- [ ] A system tray icon showing the last run and the latest statuses (the GUI
-      window exists since the unreleased version).
-- [ ] Localised reports and GUI (Spanish, ...).
-- [ ] Buttons in the Windows toast notification (open the workbook, open the
-      tracking page), through protocol activation.
-- [ ] Refuse a second `run --every` loop in the same session (today it only adds
-      requests: the run lock keeps checks from overlapping).
+      SuSy...) through a pluggable backend interface (`Backend.fetch(id) ->
+      Snapshot`). Blocked: unlike Elsevier's tracker, these systems have no public
+      tracking link; their status pages need the author's login, so a backend would
+      have to keep a password (in the system keyring) and scrape HTML, which their
+      terms of use may forbid. Start with a system that offers an unauthenticated
+      status page or an API, and design the interface around two real backends.
+- [ ] More languages for the reports and the window (Spanish is available since the
+      unreleased version): copy `src/paper_status_monitor/locales/es.py`.
+- [ ] Tray icon on Linux and macOS (the Windows one, `run --every --tray`, exists
+      since the unreleased version); it would need a third-party package.
 
 ## Done
 
+- [x] Unreleased — icon in the notification area while the periodic checks run
+      (`run --every --tray`, `autostart enable --tray`, tick box in the window), with
+      the latest statuses and a menu (check now, open the window, the report or the
+      data folder, stop); Windows only, through `ctypes`.
+
+- [x] Unreleased — reports, notifications, e-mails, summary and window in Spanish
+      (`language` setting, `init --language`, selector in the window), with a test
+      that keeps the catalogs complete.
+- [x] Unreleased — buttons in the Windows toast notifications (open the report, the
+      workbook or its folder, the tracking page), through protocol activation.
+- [x] Unreleased — `edit` command (label, custom fields and own settings, in place);
+      autostart on Linux (XDG autostart entry) and macOS (launchd agent), with tests
+      for the generated files; per-submission `record_*` / `notify_*` settings (CLI,
+      GUI, `list`, `doctor`); optional `Time in status` sheet in every workbook
+      (`time_in_status`), with live formulas for the current status; e-mail
+      notifications through SMTP (`notify = "email"`, `[email]`, `email` command),
+      with the password only in the environment or the system keyring; `organize`
+      splits a shared workbook whose submissions now map to different names; only
+      one loop of periodic checks (`run --every`) at a time; `export` of the
+      history to CSV or JSON; the statuses observed on real submissions, anonymised,
+      in `docs/how-it-works.md`.
 - [x] Unreleased — Weekly contract test against the real tracker that opens an issue
       when the format changes (`contract.yml`); periodic checks while the computer
       stays on (`run --every`, `autostart enable --every`, GUI); desktop

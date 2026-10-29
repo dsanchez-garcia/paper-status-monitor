@@ -1,8 +1,9 @@
 """One table with the latest status of every submission (``paper-status-monitor summary``).
 
 The table is built from the workbooks only (nothing is downloaded) and can be
-written as plain text, Markdown or a standalone HTML page. It does not include the
-tracking links, so it can be shared.
+written as plain text, Markdown or a standalone HTML page, in the current language
+(see :mod:`~paper_status_monitor.i18n`). It does not include the tracking links, so
+it can be shared.
 """
 
 from __future__ import annotations
@@ -13,28 +14,34 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from paper_status_monitor import storage
+from paper_status_monitor import i18n, storage
 from paper_status_monitor.config import Config, SubmissionConfig
+from paper_status_monitor.i18n import N_, _, ngettext
 from paper_status_monitor.models import DETECTED_AT_COLUMN, clean_text
 
 #: Formats accepted by :func:`render_summary`.
 FORMATS = ("text", "markdown", "html")
 
-#: Column headings, in order.
+#: Column headings, in order (in English; see :func:`headings`).
 HEADINGS = (
     "#",
-    "Submission",
-    "Journal",
-    "Manuscript number",
-    "Status",
-    "Since",
-    "Reviews",
-    "Last review activity",
+    N_("Submission"),
+    N_("Journal"),
+    N_("Manuscript number"),
+    N_("Status"),
+    N_("Since"),
+    N_("Reviews"),
+    N_("Last review activity"),
 )
 
-_TITLE = "Paper status summary"
+_TITLE = N_("Paper status summary")
 _REVIEW_COLUMNS = ("Reviews completed", "Review invitations accepted", "Review invitations sent")
 _TEXT_WIDTHS = {"Submission": 32, "Journal": 30}
+
+
+def headings() -> tuple[str, ...]:
+    """Return :data:`HEADINGS` in the current language."""
+    return tuple(_(heading) for heading in HEADINGS)
 
 
 @dataclass(frozen=True)
@@ -78,13 +85,13 @@ class SummaryRow:
             return ""
         if self.days is None:
             return self.since.isoformat()
-        unit = "day" if self.days == 1 else "days"
-        return f"{self.since.isoformat()} ({self.days} {unit})"
+        text = ngettext("{date} ({count} day)", "{date} ({count} days)", self.days)
+        return text.format(date=self.since.isoformat(), count=self.days)
 
     def cells(self) -> tuple[str, ...]:
-        """The values of the row, in the order of :data:`HEADINGS`."""
-        name = self.name if self.enabled else f"[paused] {self.name}"
-        status = self.status if self.recorded else "not recorded yet"
+        """The values of the row, in the order of :data:`HEADINGS` (in the current language)."""
+        name = self.name if self.enabled else _("[paused] {name}").format(name=self.name)
+        status = self.status if self.recorded else _("not recorded yet")
         return (
             str(self.number),
             name,
@@ -161,7 +168,7 @@ def _moment(text: str) -> datetime | None:
 def render_summary(
     rows: Sequence[SummaryRow], fmt: str = "text", *, generated_at: datetime | None = None
 ) -> str:
-    """Render the summary as ``"text"``, ``"markdown"`` or ``"html"``.
+    """Render the summary as ``"text"``, ``"markdown"`` or ``"html"``, in the current language.
 
     Raises:
         ValueError: If *fmt* is not one of :data:`FORMATS`.
@@ -178,10 +185,10 @@ def render_summary(
 
 def render_text(rows: Sequence[SummaryRow], *, generated_at: str = "") -> str:
     """Render the summary as an aligned plain-text table."""
-    lines = [f"{_TITLE} - {generated_at}".rstrip(" -"), ""]
+    lines = [f"{_(_TITLE)} - {generated_at}".rstrip(" -"), ""]
     if not rows:
-        return "\n".join([*lines, "No submissions in the configuration."]) + "\n"
-    table = [HEADINGS, *(_shortened(row.cells()) for row in rows)]
+        return "\n".join([*lines, _("No submissions in the configuration.")]) + "\n"
+    table = [headings(), *(_shortened(row.cells()) for row in rows)]
     widths = [max(len(cells[index]) for cells in table) for index in range(len(HEADINGS))]
     for cells in table:
         padded = (cell.ljust(width) for cell, width in zip(cells, widths, strict=True))
@@ -191,13 +198,13 @@ def render_text(rows: Sequence[SummaryRow], *, generated_at: str = "") -> str:
 
 def render_markdown(rows: Sequence[SummaryRow], *, generated_at: str = "") -> str:
     """Render the summary as a Markdown (GitHub-flavoured) table."""
-    lines = [f"# {_TITLE}", ""]
+    lines = [f"# {_(_TITLE)}", ""]
     if generated_at:
-        lines += [f"Generated on {generated_at}.", ""]
+        lines += [_("Generated on {moment}.").format(moment=generated_at), ""]
     if not rows:
-        return "\n".join([*lines, "No submissions in the configuration."]) + "\n"
-    lines.append("| " + " | ".join(HEADINGS) + " |")
-    lines.append("| " + " | ".join("---" for _ in HEADINGS) + " |")
+        return "\n".join([*lines, _("No submissions in the configuration.")]) + "\n"
+    lines.append("| " + " | ".join(headings()) + " |")
+    lines.append("| " + " | ".join("---" for _heading in HEADINGS) + " |")
     for row in rows:
         cells = (cell.replace("|", "\\|") or "-" for cell in row.cells())
         lines.append("| " + " | ".join(cells) + " |")
@@ -206,7 +213,8 @@ def render_markdown(rows: Sequence[SummaryRow], *, generated_at: str = "") -> st
 
 def render_html(rows: Sequence[SummaryRow], *, generated_at: str = "") -> str:
     """Render the summary as a standalone HTML page."""
-    head = "".join(f"<th>{html.escape(heading)}</th>" for heading in HEADINGS)
+    title = html.escape(_(_TITLE))
+    head = "".join(f"<th>{html.escape(heading)}</th>" for heading in headings())
     body = []
     for row in rows:
         css = "" if row.enabled else ' class="paused"'
@@ -216,13 +224,16 @@ def render_html(rows: Sequence[SummaryRow], *, generated_at: str = "") -> str:
         f"<table>\n<thead><tr>{head}</tr></thead>\n<tbody>\n" + "\n".join(body) + "\n</tbody>\n"
         "</table>"
         if rows
-        else "<p>No submissions in the configuration.</p>"
+        else f"<p>{html.escape(_('No submissions in the configuration.'))}</p>"
     )
-    generated = f"<p>Generated on {html.escape(generated_at)}.</p>\n" if generated_at else ""
+    generated = ""
+    if generated_at:
+        text = _("Generated on {moment}.").format(moment=generated_at)
+        generated = f"<p>{html.escape(text)}</p>\n"
     return (
         "<!DOCTYPE html>\n"
-        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
-        f"<title>{_TITLE}</title>\n"
+        f'<html lang="{i18n.get_language()}">\n<head>\n<meta charset="utf-8">\n'
+        f"<title>{title}</title>\n"
         "<style>\n"
         "body { font-family: system-ui, sans-serif; margin: 2em; }\n"
         "table { border-collapse: collapse; }\n"
@@ -230,7 +241,7 @@ def render_html(rows: Sequence[SummaryRow], *, generated_at: str = "") -> str:
         "th { background: #ddebf7; }\n"
         "tr.paused td { color: #808080; }\n"
         "</style>\n</head>\n<body>\n"
-        f"<h1>{_TITLE}</h1>\n{generated}{table}\n</body>\n</html>\n"
+        f"<h1>{title}</h1>\n{generated}{table}\n</body>\n</html>\n"
     )
 
 

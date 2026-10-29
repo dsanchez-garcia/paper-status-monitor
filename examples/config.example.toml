@@ -14,6 +14,10 @@ data_dir = '~/Documents/paper-status-monitor'
 # workbook, so "{paper}" would keep all the submissions of a paper in one file.
 workbook_name = "{paper} - {journal} - {manuscript_number}"
 
+# Add a "Time in status" sheet to every workbook: how long each submission spent in
+# each status (the sheet is rewritten after every change).
+time_in_status = true
+
 # Changes that add a row to the workbook: "all" or a list of columns such as
 # ["Status"], and columns whose changes alone never add a row.
 record_fields = "all"
@@ -32,6 +36,10 @@ notify = ["report", "toast"]
 
 # Also report (and notify) the submissions that cannot be checked.
 notify_on_errors = true
+
+# Language of the reports, notifications, e-mails, summary and window: "en" (English)
+# or "es" (Español). The workbooks and the command line stay in English.
+language = "en"
 
 # Seconds to wait for each answer from the tracker.
 request_timeout = 30

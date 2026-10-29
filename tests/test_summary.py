@@ -53,7 +53,7 @@ def config(tmp_path: Path) -> Config:
     return Config(
         data_dir=tmp_path / "data",
         submissions=(
-            SubmissionConfig(DEMO_UUID, label="TMY | paper"),
+            SubmissionConfig(DEMO_UUID, label="Tau | paper"),
             SubmissionConfig(OTHER_UUID, enabled=False),
         ),
     )
@@ -66,7 +66,7 @@ def rows_of(config: Config) -> list[summary.SummaryRow]:
 def test_summary_rows(config: Config) -> None:
     first, second = rows_of(config)
     assert first.number == 1
-    assert first.name == "TMY | paper"
+    assert first.name == "Tau | paper"
     assert first.recorded
     assert first.status == "Required Reviews Complete"
     assert first.since == date(2026, 2, 1)  # when the current status was first seen
@@ -101,7 +101,7 @@ def test_render_text(config: Config) -> None:
 def test_render_markdown(config: Config) -> None:
     text = summary.render_summary(rows_of(config), "markdown", generated_at=GENERATED)
     assert text.startswith("# Paper status summary\n\nGenerated on 2026-03-03 10:00.\n")
-    assert "| 1 | TMY \\| paper | Journal of Examples | ABC-D-26-00001R1 |" in text
+    assert "| 1 | Tau \\| paper | Journal of Examples | ABC-D-26-00001R1 |" in text
     assert (
         f"| 2 | [paused] {OTHER_UUID} | - | - | not recorded yet | - | - | - |" in text.splitlines()
     )
@@ -110,7 +110,7 @@ def test_render_markdown(config: Config) -> None:
 def test_render_html(config: Config) -> None:
     page = summary.render_summary(rows_of(config), "html", generated_at=GENERATED)
     assert page.startswith("<!DOCTYPE html>")
-    assert "<td>TMY | paper</td>" in page
+    assert "<td>Tau | paper</td>" in page
     assert '<tr class="paused">' in page
     assert "track.authorhub" not in page  # tracking links are personal: not in the summary
     escaped = summary.render_html([summary.SummaryRow(1, "R&D <paper>", recorded=True)])

@@ -73,15 +73,15 @@ def test_seen_snapshots_round_trip(tmp_path: Path) -> None:
     assert seen.save() is False  # nothing to write
     assert not path.exists()
 
-    seen.update(DEMO_UUID.upper(), {"Status": "Under Review"}, key="X-1", workbook="TMY.xlsx")
+    seen.update(DEMO_UUID.upper(), {"Status": "Under Review"}, key="X-1", workbook="Tau.xlsx")
     assert seen.modified
     assert seen.save() is True
     assert not seen.modified
 
     loaded = state.SeenSnapshots.load(path)
     assert loaded.values(DEMO_UUID) == {"Status": "Under Review"}
-    assert loaded.workbook(DEMO_UUID) == "TMY.xlsx"
-    loaded.update(DEMO_UUID, {"Status": "Under Review"}, key="X-1", workbook="TMY.xlsx")
+    assert loaded.workbook(DEMO_UUID) == "Tau.xlsx"
+    loaded.update(DEMO_UUID, {"Status": "Under Review"}, key="X-1", workbook="Tau.xlsx")
     assert not loaded.modified  # same state: the file is not rewritten
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["format"] == 1
@@ -98,3 +98,27 @@ def test_seen_snapshots_tolerate_damaged_files(tmp_path: Path, text: str) -> Non
     seen = state.SeenSnapshots.load(path)
     assert seen.values(DEMO_UUID) is None
     assert seen.values("x") is None
+
+
+def test_only_one_loop_of_periodic_checks(tmp_path: Path) -> None:
+    lock = tmp_path / "periodic.lock"
+    assert state.periodic_checks_holder(lock) is None
+    with state.periodic_checks_lock(lock):
+        holder = state.periodic_checks_holder(lock)
+        assert holder is not None
+        assert holder.startswith(f"in process {os.getpid()} (since ")
+        with (
+            pytest.raises(
+                state.AlreadyRunningError, match=f"already running in process {os.getpid()}"
+            ),
+            state.periodic_checks_lock(lock),
+        ):
+            pass  # pragma: no cover - never reached
+    assert state.periodic_checks_holder(lock) is None
+    with state.periodic_checks_lock(lock):  # free again
+        pass
+
+
+def test_the_default_lock_of_the_periodic_checks_is_in_the_state_folder() -> None:
+    assert paths.loop_lock_path() == paths.user_state_dir() / "periodic.lock"
+    assert state.periodic_checks_holder() is None

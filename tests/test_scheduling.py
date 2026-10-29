@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
+from time import monotonic
 
 import pytest
 
@@ -128,3 +130,28 @@ def test_run_every_survives_failing_checks() -> None:
 def test_run_every_rejects_a_zero_interval() -> None:
     with pytest.raises(ValueError, match="positive"):
         scheduling.run_every(lambda: None, timedelta(0), max_runs=1)
+
+
+def test_run_every_checks_at_once_when_asked_and_stops_when_told() -> None:
+    wake, stop = threading.Event(), threading.Event()
+    calls: list[float] = []
+
+    def check() -> None:
+        calls.append(monotonic())
+        if len(calls) == 1:
+            threading.Timer(0.05, wake.set).start()  # "Check now", from the tray icon
+        else:
+            stop.set()
+
+    started = monotonic()
+    runs = scheduling.run_every(check, timedelta(hours=12), poll=0.01, wake=wake, stop=stop)
+    assert runs == 2
+    assert monotonic() - started < 5  # it did not wait twelve hours
+    assert not wake.is_set()
+
+
+def test_run_every_stops_while_waiting() -> None:
+    wake, stop = threading.Event(), threading.Event()
+    threading.Timer(0.05, lambda: (stop.set(), wake.set())).start()
+    assert scheduling.run_every(lambda: None, timedelta(hours=1), wake=wake, stop=stop) == 1
+    assert scheduling.run_every(lambda: None, timedelta(hours=1), stop=stop) == 0

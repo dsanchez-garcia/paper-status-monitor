@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import getpass
 import json
 import logging
 import platform
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -18,6 +20,9 @@ from pathlib import Path
 
 from paper_status_monitor import (
     autostart,
+    emails,
+    i18n,
+    naming,
     notifications,
     organize,
     paths,
@@ -25,17 +30,23 @@ from paper_status_monitor import (
     scheduling,
     state,
     storage,
+    tray,
 )
+from paper_status_monitor import export as history_export
 from paper_status_monitor import summary as status_summary
 from paper_status_monitor._version import __version__
 from paper_status_monitor.client import DEMO_UUID, TrackerClient, TrackerError, parse_uuid
 from paper_status_monitor.config import (
+    SMTP_PASSWORD_ENV_VAR,
+    SUBMISSION_OVERRIDES,
     Config,
     ConfigError,
     SubmissionConfig,
     add_submission,
+    check_email_ready,
     describe_columns,
     describe_notify,
+    edit_submission,
     find_submission,
     load_config,
     parse_columns_option,
@@ -46,7 +57,7 @@ from paper_status_monitor.config import (
     write_config,
 )
 from paper_status_monitor.models import DETECTED_AT_COLUMN, TRACKER_URL_COLUMN
-from paper_status_monitor.monitor import Monitor
+from paper_status_monitor.monitor import Monitor, RunSummary
 
 log = logging.getLogger("paper_status_monitor")
 
@@ -92,6 +103,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="folder for the Excel workbooks and the reports (default: %(default)s)",
     )
     init.add_argument("--force", action="store_true", help="overwrite an existing file")
+    init.add_argument(
+        "--language",
+        type=_language_argument,
+        default=i18n.DEFAULT_LANGUAGE,
+        metavar="CODE",
+        help=(
+            "language of the reports, notifications, e-mails, summary and window: "
+            f"{', '.join(f'{code} ({name})' for code, name in i18n.LANGUAGES.items())} "
+            "(default: %(default)s)"
+        ),
+    )
     init.set_defaults(handler=cmd_init)
 
     add = commands.add_parser(
@@ -108,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME=VALUE",
         help=(
             "custom field, usable as {NAME} in the workbook name and written to an extra "
-            "column, e.g. --field paper=TMY (repeat for several fields)"
+            "column, e.g. --field paper=Tau (repeat for several fields)"
         ),
     )
     add.add_argument(
@@ -120,6 +142,55 @@ def build_parser() -> argparse.ArgumentParser:
         "SUBMISSION is its tracking link, its UUID, its label or its number in "
         "'paper-status-monitor list'. The comments of the configuration file are kept."
     )
+    edit = commands.add_parser(
+        "edit",
+        help="change the label or the custom fields of a submission",
+        description=f"Change the label or the custom fields of a submission. {which} The "
+        "previous file is kept as config.toml.bak, and workbooks keep their names until you "
+        "run 'paper-status-monitor organize'.",
+    )
+    edit.add_argument("submission", metavar="SUBMISSION", help="link, UUID, label or number")
+    edit.add_argument("--label", help='new short name (--label "" removes it)')
+    edit.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="add or change a custom field, e.g. --field paper=Tau (repeat for several fields)",
+    )
+    edit.add_argument(
+        "--remove-field",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="remove a custom field (repeat for several fields)",
+    )
+    edit.add_argument(
+        "--clear-fields",
+        action="store_true",
+        help="remove every custom field (the fields given with --field are then the only ones)",
+    )
+    own = edit.add_argument_group(
+        "own record and notify settings",
+        "Give this submission its own record_* and notify_* settings, which replace the "
+        "general settings of the same name. COLUMNS is a comma-separated list of column "
+        'names, "all" (only for --*-fields), "none", or "general" to follow the general '
+        "setting again.",
+    )
+    for option, text in (
+        ("--record-fields", "only changes in these columns add a row"),
+        ("--record-ignore", "changes only in these columns never add a row"),
+        ("--notify-fields", "only changes in these columns are reported"),
+        ("--notify-ignore", "changes in these columns are never reported"),
+    ):
+        own.add_argument(option, metavar="COLUMNS", help=text)
+    own.add_argument(
+        "--use-general-settings",
+        action="store_true",
+        help="remove every own setting (the ones given in this command are then the only ones)",
+    )
+    edit.set_defaults(handler=cmd_edit)
+
     remove = commands.add_parser(
         "remove",
         help="remove a submission from the configuration (its workbook is kept)",
@@ -178,6 +249,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     overview.set_defaults(handler=cmd_summary)
 
+    dump = commands.add_parser(
+        "export",
+        help="export the recorded history of every submission to CSV or JSON",
+        description=(
+            "Write the recorded history of every submission, read from the workbooks, as "
+            "CSV (one row per observed state) or JSON (grouped by submission). The tracking "
+            "links are left out unless --include-links is given."
+        ),
+    )
+    dump.add_argument(
+        "--format",
+        choices=history_export.FORMATS,
+        default="csv",
+        help="output format (default: %(default)s)",
+    )
+    dump.add_argument(
+        "-o", "--output", type=Path, metavar="FILE", help="write to FILE instead of showing it"
+    )
+    dump.add_argument(
+        "--include-links",
+        action="store_true",
+        help="also export the tracking links (they are personal: do not share them)",
+    )
+    dump.set_defaults(handler=cmd_export)
+
     check = commands.add_parser(
         "check",
         help="show the current status of one submission (nothing is saved)",
@@ -218,11 +314,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--tray",
+        action="store_true",
+        help=(
+            "with --every, show an icon in the notification area while checking, with the "
+            "latest statuses and a menu (Windows)"
+        ),
+    )
+    run.add_argument(
         "--notify",
         metavar="CHANNELS",
         help=(
             'how to tell you about news in this run: "report" (open the report), "toast" '
-            '(desktop notification), "report,toast" or "none"'
+            '(desktop notification), "email" (send the report), a list such as '
+            '"report,toast", or "none"'
         ),
     )
     run.add_argument(
@@ -262,11 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     tidy = commands.add_parser(
         "organize",
-        help="rename or merge the workbooks to follow the naming template",
+        help="rename, merge or split the workbooks to follow the naming template",
         description=(
-            "Rename existing workbooks, or merge them, so that their names follow the "
-            "workbook_name setting. Merged workbooks are copied to the 'backups' subfolder "
-            "of the data folder first."
+            "Rename existing workbooks, merge them or split them, so that their names follow "
+            "the workbook_name setting. Workbooks that are merged or split are copied to the "
+            "'backups' subfolder of the data folder first."
         ),
     )
     tidy.add_argument("--dry-run", action="store_true", help="only show what would be done")
@@ -284,11 +389,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     auto = commands.add_parser(
         "autostart",
-        help="run the monitor automatically at login (Windows)",
+        help="run the monitor automatically at login",
         description=(
-            "Manage the Startup-folder shortcut that runs the monitor, without a console "
-            "window, every time you log in to Windows (and, with --every, periodically "
-            "while you stay logged in)."
+            "Manage the launcher that runs the monitor in the background, without a window, "
+            "every time you log in (and, with --every, periodically while you stay logged "
+            "in): a shortcut in the Startup folder on Windows, an XDG autostart entry on "
+            "Linux or a launchd agent on macOS."
         ),
     )
     auto.add_argument("action", choices=["enable", "disable", "status"])
@@ -307,7 +413,25 @@ def build_parser() -> argparse.ArgumentParser:
             "you stay logged in"
         ),
     )
+    auto.add_argument(
+        "--tray",
+        action="store_true",
+        help="with --every, show an icon in the notification area while checking (Windows)",
+    )
     auto.set_defaults(handler=cmd_autostart)
+
+    mail = commands.add_parser(
+        "email",
+        help="send a test e-mail, or keep the SMTP password in the system keyring",
+        description=(
+            "Send a test e-mail with the settings of the [email] table, or store (or delete) "
+            "the password of the SMTP server in the system keyring, which needs the keyring "
+            "package. The password is never written to the configuration file; the "
+            f"{SMTP_PASSWORD_ENV_VAR} environment variable can be used instead."
+        ),
+    )
+    mail.add_argument("action", choices=["test", "set-password", "delete-password"])
+    mail.set_defaults(handler=cmd_email)
 
     doctor = commands.add_parser(
         "doctor",
@@ -390,14 +514,16 @@ def cmd_init(args: argparse.Namespace) -> int:
         _error(f"A configuration file already exists: {path}\nUse --force to overwrite it.")
         return EXIT_USAGE
     data_dir = args.data_dir.expanduser()
-    write_config(path, data_dir, overwrite=True)
+    write_config(path, data_dir, overwrite=True, language=args.language)
     print(f"Configuration file created: {path}")
     print(f"Data folder: {data_dir}")
+    if args.language != i18n.DEFAULT_LANGUAGE:
+        print(f"Language of the reports and the window: {i18n.language_name(args.language)}")
     print()
     print("Next steps:")
     print("  1. paper-status-monitor add <tracking link>")
     print("  2. paper-status-monitor run")
-    print("  3. paper-status-monitor autostart enable   (Windows: check at every login)")
+    print("  3. paper-status-monitor autostart enable   (check at every login)")
     print("Or do everything from a window: paper-status-monitor gui")
     return EXIT_OK
 
@@ -425,6 +551,120 @@ def cmd_add(args: argparse.Namespace) -> int:
     add_submission(path, uuid, args.label, fields)
     print(f"Added to {path}")
     return EXIT_OK
+
+
+def cmd_edit(args: argparse.Namespace) -> int:
+    """Change the label, the custom fields or the own settings of a submission, keeping
+    the comments of the configuration file."""
+    path = _config_path(args)
+    config = load_config(path)
+    submission = find_submission(config, args.submission)
+    fields = _edited_fields(submission, args)
+    overrides = _edited_overrides(submission, args)
+    if args.label is None and fields is None and overrides is None:
+        _error(
+            "Nothing to change: use --label, --field, --remove-field, --clear-fields, "
+            "--record-fields, --record-ignore, --notify-fields, --notify-ignore or "
+            "--use-general-settings."
+        )
+        return EXIT_USAGE
+    before, after = edit_submission(
+        path, submission.uuid, label=args.label, fields=fields, overrides=overrides
+    )
+    if before == after:
+        print(f"Nothing to change: {before.display_name} already has these values.")
+        return EXIT_OK
+    print(f"Updated {after.display_name} in {path}")
+    changed: set[str] = set()
+    if before.label != after.label:
+        changed.add("label")
+        print(f"  Label:  {after.label or '(none)'}  (was: {before.label or '(none)'})")
+    if dict(before.fields) != dict(after.fields):
+        changed.update(
+            name
+            for name in {*before.fields, *after.fields}
+            if before.fields.get(name) != after.fields.get(name)
+        )
+        print(
+            f"  Fields: {_describe_fields(after.fields)}  (was: {_describe_fields(before.fields)})"
+        )
+    if dict(before.overrides) != dict(after.overrides):
+        source = "its own settings" if after.overrides else "the general settings"
+        for title, columns in (
+            ("Records: ", config.recorded_columns_for),
+            ("Notifies:", config.notified_columns_for),
+        ):
+            now, then = describe_columns(columns(after)), describe_columns(columns(before))
+            print(f"  {title} {now}  (was: {then})")
+        print(f"  It now follows {source}.")
+    print(f"Previous configuration: {path.name}.bak")
+    used = [name for name in naming.template_placeholders(config.workbook_name) if name in changed]
+    if used:
+        placeholders = ", ".join(f"{{{name}}}" for name in dict.fromkeys(used))
+        print(
+            f"The workbook names use {placeholders}: an existing workbook keeps its name until "
+            "you run: paper-status-monitor organize"
+        )
+    return EXIT_OK
+
+
+def _edited_overrides(
+    submission: SubmissionConfig, args: argparse.Namespace
+) -> dict[str, tuple[str, ...] | None] | None:
+    """Return the own settings asked for by the options of ``edit`` (``None`` = unchanged).
+
+    ``general`` as the value of an option removes that own setting.
+
+    Raises:
+        ConfigError: If an option names an unknown column.
+    """
+    given = {
+        key: text for key in SUBMISSION_OVERRIDES if (text := getattr(args, key, None)) is not None
+    }
+    reset = getattr(args, "use_general_settings", False)
+    if not given and not reset:
+        return None
+    overrides = {} if reset else dict(submission.overrides)
+    for key, text in given.items():
+        if text.strip().casefold() == "general":
+            overrides.pop(key, None)
+            continue
+        option = "--" + key.replace("_", "-")
+        overrides[key] = parse_columns_option(
+            text, option=option, allow_all=key.endswith("_fields")
+        )
+    return overrides
+
+
+def _edited_fields(submission: SubmissionConfig, args: argparse.Namespace) -> dict[str, str] | None:
+    """Return the custom fields asked for by the options of ``edit`` (``None`` = unchanged).
+
+    Raises:
+        ConfigError: If an option is invalid or removes a field the submission does not have.
+    """
+    assignments = dict(parse_field_assignment(item) for item in args.field)
+    removed = list(dict.fromkeys(name.strip() for name in args.remove_field))
+    if not (assignments or removed or args.clear_fields):
+        return None
+    both = [name for name in removed if name in assignments]
+    if both:
+        raise ConfigError(f"--field and --remove-field both name the custom field {both[0]!r}.")
+    unknown = [name for name in removed if name not in submission.fields]
+    if unknown:
+        existing = ", ".join(submission.fields) or "none"
+        raise ConfigError(
+            f"{submission.display_name} has no custom field {unknown[0]!r} "
+            f"(its custom fields: {existing})."
+        )
+    fields = {} if args.clear_fields else dict(submission.fields)
+    for name in removed:
+        fields.pop(name, None)
+    fields.update(assignments)
+    return fields
+
+
+def _describe_fields(fields: Mapping[str, str]) -> str:
+    return ", ".join(f"{name} = {value}" for name, value in fields.items()) or "(none)"
 
 
 def cmd_remove(args: argparse.Namespace) -> int:
@@ -480,6 +720,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         if submission.fields:
             fields = ", ".join(f"{name} = {value}" for name, value in submission.fields.items())
             print(f"   Fields: {fields}")
+        if submission.overrides:
+            recorded = describe_columns(config.recorded_columns_for(submission))
+            notified = describe_columns(config.notified_columns_for(submission))
+            print(f"   Own settings: records {recorded}; notifies {notified}")
         print(f"   {_last_recorded(store, submission)}")
     return EXIT_OK
 
@@ -490,7 +734,8 @@ def cmd_summary(args: argparse.Namespace) -> int:
     if not config.data_dir.is_dir() and not config.data_dir.parent.is_dir():
         log.warning("The data folder is not reachable (%s): no status is shown.", config.data_dir)
     rows = status_summary.summary_rows(config)
-    text = status_summary.render_summary(rows, args.format)
+    with i18n.language(config.language):
+        text = status_summary.render_summary(rows, args.format)
     if args.output is None:
         print(text, end="")
         return EXIT_OK
@@ -502,6 +747,26 @@ def cmd_summary(args: argparse.Namespace) -> int:
         _error(f"Cannot write {path}: {exc}")
         return EXIT_FAILURE
     print(f"Summary written to {path}")
+    return EXIT_OK
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export the recorded history of every submission to CSV or JSON."""
+    config = load_config(args.config)
+    histories = history_export.collect_history(config)
+    text = history_export.render_export(histories, args.format, include_links=args.include_links)
+    if args.output is None:
+        print(text, end="")
+        return EXIT_OK
+    path = args.output.expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+    except OSError as exc:
+        _error(f"Cannot write {path}: {exc}")
+        return EXIT_FAILURE
+    rows = sum(len(history.rows) for history in histories)
+    print(f"{rows} row(s) of {len(histories)} submission(s) written to {path}")
     return EXIT_OK
 
 
@@ -530,6 +795,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     """Check every enabled submission and record the changes (once, or periodically)."""
     config = apply_run_overrides(load_config(args.config), args)
+    if getattr(args, "tray", False):
+        _check_tray_option(args)
     if not getattr(args, "every", None):
         return _check_now(config, args)
     try:
@@ -539,8 +806,36 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _check_periodically(config, args, interval)
 
 
-def _check_now(config: Config, args: argparse.Namespace, *, periodic: bool = False) -> int:
-    """Run one check of every enabled submission, publish the report and save the summary."""
+def _check_tray_option(args: argparse.Namespace) -> None:
+    """Refuse ``--tray`` without ``--every``, or on a system that cannot show the icon.
+
+    Raises:
+        ConfigError: With the reason.
+    """
+    if not args.every:
+        raise ConfigError(
+            "--tray shows an icon while the periodic checks run: add --every, e.g. --every 12h."
+        )
+    reason = tray.unavailable_reason()
+    if reason:
+        raise ConfigError(f"--tray: {reason}")
+
+
+def _check_now(
+    config: Config,
+    args: argparse.Namespace,
+    *,
+    periodic: bool = False,
+    on_summary: Callable[[RunSummary], object] | None = None,
+) -> int:
+    """Run one check of every enabled submission, publish the report and save the summary.
+
+    Args:
+        config: Configuration to use.
+        args: Options of ``run``.
+        periodic: The check is one of the periodic checks of ``run --every``.
+        on_summary: Called with the summary of the run, once it is complete.
+    """
     if not config.enabled_submissions:
         print("No enabled submissions. Add one with: paper-status-monitor add <tracking link>")
         if periodic:
@@ -559,6 +854,8 @@ def _check_now(config: Config, args: argparse.Namespace, *, periodic: bool = Fal
                 if path is not None:
                     print(f"Report: {path}")
                 state.save_last_run(summary)
+            if on_summary is not None:
+                on_summary(summary)
     except state.AlreadyRunningError as exc:
         if periodic:
             log.warning("Check skipped: %s", exc)
@@ -575,10 +872,15 @@ def _check_periodically(config: Config, args: argparse.Namespace, interval: time
 
     The configuration file is read again before every check, so changes made in the
     meantime are used; if it has become invalid, the previous settings are kept and
-    the problem is logged.
+    the problem is logged. With ``--tray``, an icon in the notification area shows
+    the latest statuses and lets the user check now or stop (see :mod:`.tray`).
     """
     current = config
     first = True
+    wake, stop = threading.Event(), threading.Event()
+    icon: tray.TrayIcon | None = None
+    if getattr(args, "tray", False):
+        icon = tray.TrayIcon(wake=wake, stop=stop, config_path=_explicit_config_path(args))
 
     def check() -> None:
         nonlocal current, first
@@ -592,13 +894,68 @@ def _check_periodically(config: Config, args: argparse.Namespace, interval: time
                     exc,
                 )
         first = False
-        _check_now(current, args, periodic=True)
+        started = datetime.now()
+        summaries: list[RunSummary] = []
+        if icon is not None:
+            icon.update(checking=True, language=current.language, data_dir=current.data_dir)
+        try:
+            _check_now(current, args, periodic=True, on_summary=summaries.append)
+        finally:
+            if icon is not None:
+                _show_in_tray(
+                    icon, current, summaries[-1] if summaries else None, started, interval
+                )
 
     every = scheduling.format_interval(interval)
-    print(f"Checking now and then every {every}, until stopped (press Ctrl+C to stop).")
-    log.info("Periodic checks every %s", every)
-    scheduling.run_every(check, interval)
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(state.periodic_checks_lock())
+        except state.AlreadyRunningError as exc:
+            log.warning("Periodic checks not started: %s", exc)
+            _error(str(exc))
+            return EXIT_FAILURE
+        loop: dict[str, threading.Event] = {}
+        if icon is not None:
+            stack.callback(icon.close)
+            icon.start(language=current.language, data_dir=current.data_dir)
+            loop = {"wake": wake, "stop": stop}
+        print(f"Checking now and then every {every}, until stopped (press Ctrl+C to stop).")
+        log.info("Periodic checks every %s", every)
+        scheduling.run_every(check, interval, **loop)
     return EXIT_OK
+
+
+def _show_in_tray(
+    icon: tray.TrayIcon,
+    config: Config,
+    summary: RunSummary | None,
+    started: datetime,
+    interval: timedelta,
+) -> None:
+    """Show the outcome of a periodic check in the icon (problems are only logged)."""
+    try:
+        rows = tuple(status_summary.summary_rows(config))
+    except Exception:  # never stop the periodic checks because of the icon
+        log.exception("The statuses shown by the icon could not be read")
+        rows = icon.state.rows
+    changes: dict[str, object] = {
+        "checking": False,
+        "language": config.language,
+        "data_dir": config.data_dir,
+        "last_check": started,
+        "next_check": started + interval,
+        "rows": rows,
+    }
+    if summary is not None:
+        changes.update(news=len(summary.changed), failed=len(summary.failed))
+        if summary.report_path is not None:
+            changes["report"] = summary.report_path
+    icon.update(**changes)
+
+
+def _explicit_config_path(args: argparse.Namespace) -> Path | None:
+    """The configuration file given with ``--config``, as an absolute path, or ``None``."""
+    return args.config.expanduser().resolve() if args.config else None
 
 
 def apply_run_overrides(config: Config, args: argparse.Namespace) -> Config:
@@ -631,10 +988,22 @@ def apply_run_overrides(config: Config, args: argparse.Namespace) -> Config:
     notify = config.notify
     if getattr(args, "notify", None) is not None:
         notify = parse_notify(args.notify, setting="--notify")
+        if "email" in notify:
+            check_email_ready(config.email, setting="--notify")
     if getattr(args, "no_open", False):
         notify = tuple(channel for channel in notify if channel != "report")
     if notify != config.notify:
         changes["notify"] = notify
+    overridden = {key for key in SUBMISSION_OVERRIDES if key in changes}
+    if any(overridden & set(submission.overrides) for submission in config.submissions):
+        # The options also win over the own settings of the submissions.
+        changes["submissions"] = tuple(
+            replace(
+                submission,
+                overrides={k: v for k, v in submission.overrides.items() if k not in overridden},
+            )
+            for submission in config.submissions
+        )
     return replace(config, **changes) if changes else config  # type: ignore[arg-type]
 
 
@@ -666,7 +1035,7 @@ def cmd_organize(args: argparse.Namespace) -> int:
     for line in outcome.done:
         print(line)
     if outcome.backup_dir is not None:
-        print(f"Copies of the workbooks before merging: {outcome.backup_dir}")
+        print(f"Copies of the workbooks before merging or splitting: {outcome.backup_dir}")
     for line in outcome.errors:
         _error(line)
     return EXIT_FAILURE if outcome.errors else EXIT_OK
@@ -680,10 +1049,10 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 
 def cmd_autostart(args: argparse.Namespace) -> int:
-    """Enable, disable or show the Windows autostart shortcut."""
+    """Enable, disable or show the launcher that runs the monitor at login."""
     if not autostart.is_supported():
         _error(
-            "Built-in autostart is only available on Windows. On Linux or macOS see "
+            "Built-in autostart is not available on this system. See "
             f"{DOCS_URL}/en/latest/autostart.html"
         )
         return EXIT_USAGE
@@ -694,9 +1063,13 @@ def cmd_autostart(args: argparse.Namespace) -> int:
                 every = scheduling.parse_interval(args.every)
             except ValueError as exc:
                 raise ConfigError(f"--every: {exc}") from exc
-        config_path = args.config.expanduser().resolve() if args.config else None
+        if args.tray:
+            _check_tray_option(args)
+        config_path = _explicit_config_path(args)
         load_config(config_path)  # refuse to install a launcher that would fail
-        path = autostart.enable(wait=args.wait, config_path=config_path, every=every)
+        path = autostart.enable(
+            wait=args.wait, config_path=config_path, every=every, tray=args.tray
+        )
         print(f"Autostart enabled: {path}")
         print(f"Interpreter: {autostart.gui_interpreter()}")
         if every is None:
@@ -707,6 +1080,14 @@ def cmd_autostart(args: argparse.Namespace) -> int:
                 f"every {scheduling.format_interval(every)} while you stay logged in "
                 "(starting with your next login)."
             )
+        if args.tray:
+            print(
+                "An icon in the notification area shows the latest statuses while the "
+                "periodic checks run."
+            )
+        warning = autostart.session_warning()
+        if warning:
+            print(f"Warning: {warning}")
         return EXIT_OK
     if args.action == "disable":
         removed = autostart.disable()
@@ -716,15 +1097,57 @@ def cmd_autostart(args: argparse.Namespace) -> int:
     if info is None:
         print("Autostart is not enabled. Enable it with: paper-status-monitor autostart enable")
         return EXIT_OK
-    print(f"Shortcut:    {info.path}")
+    print(f"Launcher:    {info.path}")
     print(f"Interpreter: {info.target}{'' if info.target_exists else '  (MISSING!)'}")
     print(f"Arguments:   {info.arguments}")
     every = info.every
     when = "at login"
     if every is not None:
         when += f", then every {scheduling.format_interval(every)}"
+        if info.tray:
+            when += ", with an icon in the notification area"
     print(f"Checks:      {when}")
     return EXIT_OK if info.target_exists else EXIT_FAILURE
+
+
+def cmd_email(args: argparse.Namespace) -> int:
+    """Send a test e-mail, or store or delete the SMTP password in the system keyring."""
+    config = load_config(args.config)
+    settings = config.email
+    try:
+        if args.action == "test":
+            if settings.missing:
+                raise ConfigError(
+                    f"The [email] table of {config.path} lacks {', '.join(settings.missing)}. "
+                    f"See {DOCS_URL}/en/latest/configuration.html#e-mail-notifications"
+                )
+            password = emails.smtp_password(settings)
+            with i18n.language(config.language):
+                message = emails.sample_message(settings)
+            emails.send(message, settings, password=password)
+            print(f"Test e-mail sent to {', '.join(settings.to)} through {settings.smtp_host}.")
+            print("Check the inbox (and the spam folder).")
+            return EXIT_OK
+        if args.action == "set-password":
+            if not settings.username:
+                raise ConfigError(
+                    f"Set 'username' in the [email] table of {config.path} first: the "
+                    "password is kept for that user."
+                )
+            prompt = f"Password of {settings.username} on {settings.smtp_host or 'the server'}: "
+            password = getpass.getpass(prompt)
+            if not password:
+                _error("No password was typed: nothing was stored.")
+                return EXIT_USAGE
+            emails.store_password(settings, password)
+            print(f"The password of {settings.username} is now kept in the system keyring.")
+            return EXIT_OK
+        removed = emails.delete_password(settings)
+    except emails.EmailError as exc:
+        _error(str(exc))
+        return EXIT_FAILURE
+    print("Password removed from the system keyring." if removed else "No password was stored.")
+    return EXIT_OK
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -748,12 +1171,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             doctor.warn(f"Configuration: {config_path} has no enabled submissions")
         doctor.info(f"Changes recorded: {describe_columns(config.recorded_columns)}")
         doctor.info(f"Changes notified: {describe_columns(config.notified_columns)}")
+        own = [s.display_name for s in config.submissions if s.overrides]
+        if own:
+            doctor.info(
+                f"With their own record/notify settings: {', '.join(own)} "
+                "(see: paper-status-monitor list)"
+            )
         doctor.info(f"When there is news: {describe_notify(config.notify)}")
+        doctor.info(
+            "Language of the reports, notifications, e-mails, summary and window: "
+            f"{i18n.language_name(config.language)} ({config.language})"
+        )
         if "toast" in config.notify:
             problem = notifications.unavailable_reason()
             if problem:
                 doctor.warn(f"Desktop notifications: {problem}")
+        if "email" in config.notify:
+            problem = emails.unavailable_reason(config.email)
+            if problem:
+                doctor.warn(f"E-mails: {problem}")
+            else:
+                to = ", ".join(config.email.to)
+                doctor.info(f"E-mails are sent to {to} through {config.email.smtp_host}")
         doctor.info(f"Workbook names: {config.workbook_name}")
+        if config.time_in_status:
+            doctor.info("Workbooks get a 'Time in status' sheet (time_in_status = true)")
         _check_data_dir(doctor, config.data_dir)
         _check_workbook_names(doctor, config)
 
@@ -770,6 +1212,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         doctor.info("Autostart: not built in on this platform (see the documentation)")
 
     _check_last_run(doctor)
+    holder = state.periodic_checks_holder()
+    if holder:
+        doctor.info(f"Periodic checks are running {holder}")
     print()
     print("No problems found." if not doctor.failures else f"{doctor.failures} problem(s) found.")
     return EXIT_FAILURE if doctor.failures else EXIT_OK
@@ -838,7 +1283,7 @@ def _check_autostart(doctor: _Doctor) -> None:
     try:
         info = autostart.status()
     except autostart.AutostartError as exc:
-        doctor.fail(f"Autostart shortcut could not be read: {exc}")
+        doctor.fail(f"The autostart launcher could not be read: {exc}")
         return
     if info is None:
         doctor.warn("Autostart is not enabled (run: paper-status-monitor autostart enable)")
@@ -912,6 +1357,14 @@ def _last_recorded(store: storage.WorkbookStore, submission: SubmissionConfig) -
 
 def _config_path(args: argparse.Namespace) -> Path:
     return args.config.expanduser() if args.config else paths.default_config_path()
+
+
+def _language_argument(value: str) -> str:
+    """Check the language given on the command line (an argparse ``type``)."""
+    try:
+        return i18n.normalize_language(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _parse_uuid_argument(value: str) -> str | None:

@@ -74,7 +74,7 @@ def test_should_write_report(snapshot: Snapshot) -> None:
 
 def test_render_console(snapshot: Snapshot) -> None:
     text = report.render_console(make_summary(snapshot))
-    assert text.splitlines()[0] == "Checked 4 submission(s) at 2026-01-02 09:30:00"
+    assert text.splitlines()[0] == "Checked 4 submissions at 2026-01-02 09:30:00"
     assert "[CHANGED]" in text
     assert "[NEW]" in text
     assert "[ERROR]     Broken: The tracker answered HTTP 503" in text
@@ -141,12 +141,12 @@ def test_render_console_tags_changes_that_are_not_notified(snapshot: Snapshot) -
 
 def test_report_lists_custom_fields(snapshot: Snapshot) -> None:
     result = SubmissionResult(
-        SubmissionConfig(DEMO_UUID, fields={"paper": "TMY", "funding_agency": "X"}),
+        SubmissionConfig(DEMO_UUID, fields={"paper": "Tau", "funding_agency": "X"}),
         snapshot=snapshot,
         changes=[Change("Status", "Under Review", "Review Complete")],
     )
     text = report.render_report(RunSummary(started_at=STARTED, results=[result]))
-    assert "  Paper: TMY" in text
+    assert "  Paper: Tau" in text
     assert "  Funding agency: X" in text
 
 

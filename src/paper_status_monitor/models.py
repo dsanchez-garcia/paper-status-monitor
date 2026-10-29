@@ -100,7 +100,7 @@ def ordinal(number: int) -> str:
 
 
 def format_tracker_date(timestamp: Any, tz: tzinfo | None = None) -> str:
-    """Format a Unix timestamp the way the tracking page does (``"25th January 2025"``).
+    """Format a Unix timestamp the way the tracking page does (``"17th May 2022"``).
 
     Args:
         timestamp: Seconds since the epoch, as returned by the tracker.

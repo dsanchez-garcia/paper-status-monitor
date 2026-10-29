@@ -8,6 +8,8 @@ For every submission, the state fetched from the tracker is compared twice:
   to decide what is reported (columns chosen by ``notify_fields`` /
   ``notify_ignore``).
 
+A submission may have its own ``record_*`` / ``notify_*`` settings, which replace
+the general ones for it (see :meth:`~paper_status_monitor.config.Config.recorded_columns_for`).
 Both comparisons give the same result unless a column is reported but not
 recorded; keeping the last state seen makes sure such a change is reported once.
 """
@@ -265,11 +267,11 @@ class Monitor:
         else:
             before = Snapshot.from_record(location.last_record)
             result.recorded_changes = _only(
-                diff_snapshots(before, snapshot), self.config.recorded_columns
+                diff_snapshots(before, snapshot), self.config.recorded_columns_for(submission)
             )
             result.changes = _only(
                 diff_snapshots(self._reference(submission.uuid, before), snapshot),
-                self.config.notified_columns,
+                self.config.notified_columns_for(submission),
             )
             if location.path.name != target:
                 log.info(
@@ -282,7 +284,13 @@ class Monitor:
         if dry_run:
             return
         if result.is_new or result.recorded_changes:
-            store.append(location.path, self._row(snapshot, submission))
+            store.append(
+                location.path,
+                self._row(snapshot, submission),
+                time_in_status=self.config.time_in_status,
+            )
+        elif self.config.time_in_status:
+            self._add_time_sheet(location.path)
         seen.update(submission.uuid, snapshot.to_record(), key=key, workbook=location.path.name)
 
     def _handle_not_found(
@@ -300,18 +308,36 @@ class Monitor:
         if before.status == UNAVAILABLE_STATUS:
             result.snapshot = before
             if not dry_run:
+                if self.config.time_in_status:
+                    self._add_time_sheet(location.path)
                 seen.update(uuid, before.to_record(), key=location.key, workbook=location.path.name)
             return
         after = before.replace(status=UNAVAILABLE_STATUS, status_code="")
         result.snapshot = after
         result.recorded_changes = diff_snapshots(before, after)  # always recorded, once
         result.changes = _only(
-            diff_snapshots(self._reference(uuid, before), after), self.config.notified_columns
+            diff_snapshots(self._reference(uuid, before), after),
+            self.config.notified_columns_for(result.submission),
         )
         if dry_run:
             return
-        store.append(location.path, self._row(after, result.submission))
+        store.append(
+            location.path,
+            self._row(after, result.submission),
+            time_in_status=self.config.time_in_status,
+        )
         seen.update(uuid, after.to_record(), key=location.key, workbook=location.path.name)
+
+    def _add_time_sheet(self, path: Path) -> None:
+        """Add the *Time in status* sheet to a workbook that lacks it (best effort)."""
+        store, _ = self._require_session()
+        try:
+            if path.is_file() and store.add_time_sheet(path):
+                log.info("Added the %r sheet to %s", storage.TIME_SHEET_TITLE, path.name)
+        except Exception as exc:  # the extra sheet must never break a check
+            log.warning(
+                "Could not add the %r sheet to %s: %s", storage.TIME_SHEET_TITLE, path.name, exc
+            )
 
     def _reference(self, uuid: str, recorded: Snapshot) -> Snapshot:
         """State that notifications are compared with: last seen, else last recorded."""

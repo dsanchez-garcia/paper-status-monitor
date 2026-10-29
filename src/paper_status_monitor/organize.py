@@ -9,12 +9,15 @@ with the current template:
 * a workbook whose submissions now map to a free name is **renamed**;
 * workbooks whose submissions now map to the same name (for example, with
   ``workbook_name = "{paper}"``, the submissions of one paper to several journals)
-  are **merged** into one, with the rows in chronological order. A copy of every
-  workbook involved is first saved in ``<data_dir>/backups/organize-<date>/``.
+  are **merged** into one, with the rows in chronological order;
+* a workbook whose submissions now map to different names is **split**: the rows of
+  each submission go to its workbook (a copy of the original, or an existing
+  workbook they are merged into), and the original keeps only its own rows or is
+  removed.
 
-A workbook is left untouched (and the reason reported) when it also holds rows of
-submissions that are not in the configuration, or when its submissions would go
-to different workbooks (splitting a workbook is not supported).
+A copy of every workbook that is merged or split is first saved in
+``<data_dir>/backups/organize-<date>/``. A workbook is left untouched (and the reason
+reported) when it also holds rows of submissions that are not in the configuration.
 """
 
 from __future__ import annotations
@@ -22,13 +25,14 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from paper_status_monitor import naming, storage
 from paper_status_monitor.config import Config, SubmissionConfig
+from paper_status_monitor.i18n import _, ngettext
 from paper_status_monitor.models import Snapshot
 from paper_status_monitor.state import SEEN_FILE_NAME, SeenSnapshots
 
@@ -63,26 +67,46 @@ class WorkbookName:
 
 @dataclass(frozen=True)
 class Action:
-    """A planned rename or merge.
+    """A planned rename, merge or split.
 
     Attributes:
-        kind: ``"rename"`` or ``"merge"``.
-        target: Workbook that results from the action.
-        sources: Workbooks renamed or merged into *target*.
+        kind: ``"rename"``, ``"merge"`` or ``"split"``.
+        target: Workbook that results from the action (for a split, the workbook
+            that is split).
+        sources: Workbooks renamed or merged into *target* (for a split, the workbook
+            that is split).
         submissions: Names of the submissions whose history moves.
+        parts: For a split, the workbook of every group of submissions, with the
+            base manuscript number, the tracking UUID and the name of each one.
     """
 
     kind: str
     target: Path
     sources: tuple[Path, ...]
     submissions: tuple[str, ...] = ()
+    parts: tuple[tuple[Path, tuple[tuple[str, str, str], ...]], ...] = ()
 
     def describe(self) -> str:
-        """Return a human-readable, multi-line description of the action."""
+        """Return a human-readable, multi-line description of the action.
+
+        The text is in the current language (see :mod:`~paper_status_monitor.i18n`).
+        """
         if self.kind == "rename":
-            return f"Rename  {self.sources[0].name}\n    ->  {self.target.name}"
-        existing = " (existing workbook)" if self.target.exists() else ""
-        lines = [f"Merge into  {self.target.name}{existing}"]
+            return _("Rename  {source}\n    ->  {target}").format(
+                source=self.sources[0].name, target=self.target.name
+            )
+        if self.kind == "split":
+            lines = [_("Split   {workbook}").format(workbook=self.target.name)]
+            for target, members in self.parts:
+                if target == self.target:
+                    note = " " + _("(kept here)")
+                else:
+                    note = " " + _("(existing workbook)") if target.exists() else ""
+                who = ", ".join(name for _key, _uuid, name in members)
+                lines.append(f"    ->  {target.name}{note}: {who}")
+            return "\n".join(lines)
+        existing = " " + _("(existing workbook)") if self.target.exists() else ""
+        lines = [_("Merge into  {workbook}").format(workbook=self.target.name) + existing]
         lines += [f"    +  {source.name}" for source in self.sources]
         return "\n".join(lines)
 
@@ -149,13 +173,15 @@ def plan_organize(config: Config, store: storage.WorkbookStore | None = None) ->
             by_source.setdefault(name.current, []).append(name)
 
     groups: dict[str, dict[Path, list[WorkbookName]]] = {}
+    splits: list[Action] = []
     for source, names in by_source.items():
         expected = {str(name.expected) for name in names}
         if len({value.casefold() for value in expected}) > 1:
-            plan.skipped.append(
-                f"{source.name}: its submissions ({_names(names)}) would now go to different "
-                "workbooks; splitting a workbook is not supported, move the rows by hand."
-            )
+            split = _plan_split(source, names, store, config.data_dir)
+            if isinstance(split, str):
+                plan.skipped.append(split)
+            else:
+                splits.append(split)
             continue
         owned = {
             id(record)
@@ -165,10 +191,14 @@ def plan_organize(config: Config, store: storage.WorkbookStore | None = None) ->
         foreign = sum(1 for record in store.records(source) if id(record) not in owned)
         target_name = expected.pop()
         if foreign and source.name != target_name:
-            plan.skipped.append(
-                f"{source.name}: it also holds {foreign} row(s) of submissions that are not in "
-                "the configuration; rename or merge it by hand."
+            reason = ngettext(
+                "{workbook}: it also holds {count} row of submissions that are not in the "
+                "configuration; rename or merge it by hand.",
+                "{workbook}: it also holds {count} rows of submissions that are not in the "
+                "configuration; rename or merge it by hand.",
+                foreign,
             )
+            plan.skipped.append(reason.format(workbook=source.name, count=foreign))
             continue
         groups.setdefault(target_name.casefold(), {})[source] = names
 
@@ -194,9 +224,24 @@ def plan_organize(config: Config, store: storage.WorkbookStore | None = None) ->
         if action.target in moving_sources and action.target not in action.sources:
             plan.actions.remove(action)
             plan.skipped.append(
-                f"{action.target.name}: it is renamed or merged itself; run 'organize' again "
-                "afterwards to finish."
+                _(
+                    "{workbook}: it is renamed or merged itself; run 'organize' again "
+                    "afterwards to finish."
+                ).format(workbook=action.target.name)
             )
+    busy = {path for action in plan.actions for path in (action.target, *action.sources)}
+    split_sources = {action.target for action in splits}
+    for action in splits:
+        parts = {target for target, _members in action.parts} - {action.target}
+        if action.target in busy or parts & (busy | split_sources):
+            plan.skipped.append(
+                _(
+                    "{workbook}: it takes part in another change; run 'organize' again "
+                    "afterwards to split it."
+                ).format(workbook=action.target.name)
+            )
+        else:
+            plan.actions.append(action)
     return plan
 
 
@@ -217,12 +262,19 @@ def apply_organize(
                 if outcome.backup_dir is None:
                     stamp = f"organize-{now():%Y-%m-%d_%H-%M-%S}"
                     outcome.backup_dir = config.data_dir / BACKUP_DIR_NAME / stamp
-                done, problems = _merge(action, outcome.backup_dir)
+                change = _split if action.kind == "split" else _merge
+                done, problems = change(
+                    action, outcome.backup_dir, time_in_status=config.time_in_status
+                )
                 outcome.done.append(done)
                 outcome.errors += problems
+        except storage.WorkbookLockedError as exc:
+            outcome.errors.append(f"{_first_line(action)}: {exc}")
         except PermissionError as exc:
             outcome.errors.append(
-                f"{_first_line(action)}: {exc}. Close the workbooks in Excel and try again."
+                _("{action}: {error}. Close the workbooks in Excel and try again.").format(
+                    action=_first_line(action), error=exc
+                )
             )
         except Exception as exc:  # report and keep going with the other actions
             log.exception("Could not organize %s", action.target.name)
@@ -237,28 +289,129 @@ def apply_organize(
 def _rename(action: Action) -> str:
     source, target = action.sources[0], action.target
     if target.exists() and not _same_file(source, target):
-        raise FileExistsError(f"{target.name} already exists")
+        raise FileExistsError(_("{workbook} already exists").format(workbook=target.name))
     os.replace(source, target)
-    return f"Renamed {source.name} -> {target.name}"
+    return _("Renamed {source} -> {target}").format(source=source.name, target=target.name)
 
 
-def _merge(action: Action, backup_dir: Path) -> tuple[str, list[str]]:
+def _merge(
+    action: Action, backup_dir: Path, *, time_in_status: bool = False
+) -> tuple[str, list[str]]:
     backup_dir.mkdir(parents=True, exist_ok=True)
     for path in (action.target, *action.sources):
         if path.exists():
             shutil.copy2(path, backup_dir / path.name)
-    rows = storage.merge_workbooks(action.target, action.sources)
+    rows = storage.merge_workbooks(action.target, action.sources, time_in_status=time_in_status)
     problems = []
     for source in action.sources:
         try:
             source.unlink()
         except OSError as exc:
             problems.append(
-                f"{source.name} was merged into {action.target.name} but could not be "
-                f"removed ({exc}); delete it by hand (a copy is in {backup_dir})."
+                _(
+                    "{source} was merged into {target} but could not be removed ({error}); "
+                    "delete it by hand (a copy is in {folder})."
+                ).format(
+                    source=source.name, target=action.target.name, error=exc, folder=backup_dir
+                )
             )
     merged = ", ".join(source.name for source in action.sources)
-    return f"Merged {merged} into {action.target.name} ({rows} rows)", problems
+    done = ngettext(
+        "Merged {sources} into {target} ({count} row)",
+        "Merged {sources} into {target} ({count} rows)",
+        rows,
+    )
+    return done.format(sources=merged, target=action.target.name, count=rows), problems
+
+
+def _plan_split(
+    source: Path, names: list[WorkbookName], store: storage.WorkbookStore, data_dir: Path
+) -> Action | str:
+    """Plan how to split a workbook whose submissions now go to different workbooks.
+
+    Returns:
+        The action, or the reason why the workbook is left as it is.
+    """
+    groups: dict[str, list[WorkbookName]] = {}
+    for name in names:
+        groups.setdefault(str(name.expected).casefold(), []).append(name)
+    unattributed = 0
+    for record in store.records(source):
+        owners = [
+            group
+            for group in groups.values()
+            if any(storage.belongs_to(record, name.key, name.submission.uuid) for name in group)
+        ]
+        unattributed += len(owners) != 1
+    if unattributed:
+        reason = ngettext(
+            "{workbook}: its submissions ({names}) now go to different workbooks, but "
+            "{count} of its rows belongs to none of them (or to several); split it by hand.",
+            "{workbook}: its submissions ({names}) now go to different workbooks, but "
+            "{count} of its rows belong to none of them (or to several); split it by hand.",
+            unattributed,
+        )
+        return reason.format(workbook=source.name, names=_names(names), count=unattributed)
+    parts = tuple(
+        (
+            data_dir / str(group[0].expected),
+            tuple((name.key, name.submission.uuid, name.submission.display_name) for name in group),
+        )
+        for group in groups.values()
+    )
+    names_moved = tuple(name.submission.display_name for name in names)
+    return Action("split", source, (source,), names_moved, parts)
+
+
+def _split(
+    action: Action, backup_dir: Path, *, time_in_status: bool = False
+) -> tuple[str, list[str]]:
+    """Move the rows of every submission of a workbook to its own workbook."""
+    source = action.target
+    involved = [source, *(target for target, _members in action.parts if target != source)]
+    storage.ensure_writable(involved)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for path in involved:
+        copy = backup_dir / path.name
+        if path.exists() and not copy.exists():  # keep the oldest copy of this run
+            shutil.copy2(path, copy)
+    moved: list[str] = []
+    kept: Callable[[Mapping[str, str]], bool] | None = None
+    for target, members in action.parts:
+        if target == source or _same_file(target, source):
+            kept = _rows_of(members)
+            continue
+        rows = storage.copy_rows(source, target, _rows_of(members), time_in_status=time_in_status)
+        part = ngettext("{workbook} ({count} row)", "{workbook} ({count} rows)", rows)
+        moved.append(part.format(workbook=target.name, count=rows))
+    targets = ", ".join(moved)
+    if kept is not None:
+        rows = storage.copy_rows(source, source, kept, time_in_status=time_in_status)
+        done = ngettext(
+            "Split {workbook}: kept {count} row, moved the others to {targets}",
+            "Split {workbook}: kept {count} rows, moved the others to {targets}",
+            rows,
+        )
+        return done.format(workbook=source.name, count=rows, targets=targets), []
+    done = _("Split {workbook} into {targets}").format(workbook=source.name, targets=targets)
+    try:
+        source.unlink()
+    except OSError as exc:
+        problem = _(
+            "{workbook} was split but could not be removed ({error}); delete it by hand "
+            "(a copy is in {folder})."
+        ).format(workbook=source.name, error=exc, folder=backup_dir)
+        return done, [problem]
+    return done, []
+
+
+def _rows_of(members: tuple[tuple[str, str, str], ...]) -> Callable[[Mapping[str, str]], bool]:
+    """Return a test for the rows of a group of submissions."""
+
+    def keep(record: Mapping[str, str]) -> bool:
+        return any(storage.belongs_to(record, key, uuid) for key, uuid, _name in members)
+
+    return keep
 
 
 def _same_file(first: Path, second: Path) -> bool:
@@ -269,7 +422,7 @@ def _same_file(first: Path, second: Path) -> bool:
 
 
 def _first_line(action: Action) -> str:
-    return action.describe().splitlines()[0].replace("  ", " ")
+    return " ".join(action.describe().splitlines()[0].split())
 
 
 def _names(names: list[WorkbookName]) -> str:

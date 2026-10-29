@@ -33,16 +33,16 @@ workbook_name = "{paper}"
 
 [[submissions]]
 url = "https://track.authorhub.elsevier.com/?uuid=00000000-0000-0000-0000-000000000000"
-label = "TMY - Energy and Buildings (rejected)"
-fields = { paper = "TMY" }
+label = "Tau - Journal of Examples (rejected)"
+fields = { paper = "Tau" }
 
 [[submissions]]
 url = "https://track.authorhub.elsevier.com/?uuid=11111111-2222-3333-4444-555555555555"
-label = "TMY - Building and Environment"
-fields = { paper = "TMY" }
+label = "Tau - Another Journal"
+fields = { paper = "Tau" }
 ```
 
-both submissions are recorded in `TMY.xlsx`: one row per observed state of either
+both submissions are recorded in `Tau.xlsx`: one row per observed state of either
 submission, in chronological order, with the `Journal`, `Manuscript number` and
 `Paper` columns telling them apart. The template must not contain
 `{manuscript_number}` for this to happen.
@@ -78,9 +78,15 @@ paper-status-monitor organize             # do it
   workbook involved is first saved in `<data_dir>/backups/organize-<date>/`, and the
   merged workbooks are then removed. Other sheets, charts or formatting of the
   workbook used as the base are kept; those of the others remain in the copies.
-- A workbook that also holds rows of submissions that are not in the configuration,
-  or whose submissions would now go to different workbooks, is left untouched and
-  reported (splitting a workbook is not supported).
+- A workbook whose submissions now map to different names (for example, after
+  changing `{paper}` to `{paper} - {journal}`) is **split**: the rows of every
+  submission go to its workbook, which is created as a copy of the original (with its
+  formatting and other sheets) or, if it already exists, receives them in
+  chronological order. The original keeps the rows of the submissions that still map
+  to its name, or is removed. A copy of every workbook involved is saved first, as
+  for merges, and the history of a submission is never divided.
+- A workbook that also holds rows of submissions that are not in the configuration
+  is left untouched and reported.
 
 Close the workbooks in Excel before organizing them. The graphical interface offers
 the same through *Workbooks → Organize workbooks*.
@@ -96,8 +102,8 @@ notified* in {doc}`configuration` to choose which columns add rows).
 | `Detected at` | Local date and time at which the state was first seen. |
 | `Title` | Manuscript title, without the `[1st revision]` prefix shown on the page. |
 | `Revision` | `0` for the original submission, `1` for R1, and so on. |
-| `Status` | Status as shown on the page: `Under Review`, `Required Reviews Complete` or `Review Complete`. |
-| `Status code` | Internal numeric status behind the label (see {doc}`how-it-works`). |
+| `Status` | Status as shown on the page: `Under Review`, `Required Reviews Complete` or `Review Complete` (which covers several stages, see {ref}`observed-statuses`). |
+| `Status code` | Internal numeric status behind the label (see {ref}`observed-statuses`). |
 | `Last review activity` | Last time a reviewer was invited, accepted or completed a review. |
 | `Reviews completed` | Number of completed reviews. |
 | `Review invitations accepted` | Number of reviewers who accepted. |
@@ -115,7 +121,7 @@ compared. All the other columns are compared with the last row of the submission
 decide whether a row is added (`record_fields`, `record_ignore`) and with the last
 state seen to decide what is reported (`notify_fields`, `notify_ignore`).
 
-Dates are written exactly as the official page shows them (`25th January 2025`),
+Dates are written exactly as the official page shows them (`17th May 2022`),
 converted to your local time zone like your browser does.
 
 ```{note}
@@ -129,6 +135,36 @@ When the tracker stops returning data for a submission that already has a workbo
 (it answers *404 Not Found*, which usually happens once a final decision has been
 made), a last row with the status `No longer available in the tracker` is added
 once. You can then remove the submission from the configuration.
+
+(time-in-status)=
+## Time in each status
+
+With `time_in_status = true` (or *Workbooks → Add a 'Time in status' sheet* in the
+graphical interface), every workbook gets a second sheet, `Time in status`, with the
+periods that each of its submissions spent in each status:
+
+| Manuscript number | Journal | Revision | Status | From | To | Days |
+| --- | --- | --- | --- | --- | --- | --- |
+| ABC-D-26-00001 | Journal of Examples | 0 | Under Review | 2026-01-02 09:30 | 2026-02-11 08:10 | 39.9 |
+| ABC-D-26-00001 | Journal of Examples | 0 | Required Reviews Complete | 2026-02-11 08:10 | 2026-02-20 09:00 | 9.0 |
+| ABC-D-26-00001 | Journal of Examples | 0 | Review Complete | 2026-02-20 09:00 | 2026-03-30 10:00 | 38.0 |
+| ABC-D-26-00001 | Journal of Examples | 1 | Under Review | 2026-03-30 10:00 | now | 12.3 |
+
+followed by the **total days in each status** of every submission, and the number of
+periods in it.
+
+- A period is a run of consecutive rows of a submission with the same status and
+  revision: it starts when the status was first recorded and ends when the next one
+  was. Rows without a `Detected at` date are left out.
+- The days of the current status, and the totals, are Excel formulas (`NOW()`,
+  `SUMIFS`), so they keep growing while the workbook is closed. Excel, LibreOffice
+  and other spreadsheet programs calculate them when they open the file.
+- A `No longer available in the tracker` row ends the last period and has no days.
+- The sheet is added at the next run and rewritten whenever a row is added or
+  workbooks are merged by `organize`: do not edit it. Once a workbook has the sheet,
+  it is kept up to date even if you turn the setting off; delete the sheet to stop.
+- A sheet with that name that was not written by paper-status-monitor is never
+  overwritten (a warning is logged instead).
 
 ## The state file
 

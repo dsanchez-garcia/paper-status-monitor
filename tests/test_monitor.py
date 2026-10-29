@@ -4,7 +4,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from openpyxl import load_workbook
 
+from paper_status_monitor import storage
 from paper_status_monitor.client import (
     DEMO_UUID,
     SubmissionNotFoundError,
@@ -22,6 +24,45 @@ MAY_18 = 1652887284  # "Last review activity" one day after the demo record
 
 def workbooks(config: Config) -> list[Path]:
     return sorted(config.data_dir.glob("*.xlsx"))
+
+
+def test_time_in_status_sheet_is_added_and_kept_up_to_date(
+    config, fake_client, make_payload, clock
+) -> None:
+    fake_client.queue(DEMO_UUID, make_payload(), make_payload(), make_payload(Status=4))
+    Monitor(config, fake_client, now=clock).run()
+    [path] = workbooks(config)
+    assert load_workbook(path).sheetnames == [storage.SHEET_TITLE]  # the setting is off
+
+    enabled = replace(config, time_in_status=True)
+    clock.advance(days=1)
+    Monitor(enabled, fake_client, now=clock).run()  # nothing changed: the sheet is added
+    assert load_workbook(path).sheetnames == [storage.SHEET_TITLE, storage.TIME_SHEET_TITLE]
+
+    clock.advance(days=2)
+    [result] = Monitor(enabled, fake_client, now=clock).run().results  # a change: rewritten
+    assert result.recorded
+    sheet = load_workbook(path)[storage.TIME_SHEET_TITLE]
+    assert [sheet["D5"].value, sheet["G5"].value, sheet["D6"].value] == [
+        "Under Review",
+        3,
+        "Required Reviews Complete",
+    ]
+
+
+def test_time_in_status_problems_do_not_stop_a_check(
+    config, fake_client, make_payload, clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client.queue(DEMO_UUID, make_payload())
+    Monitor(config, fake_client, now=clock).run()
+
+    def locked(path: Path) -> bool:
+        raise storage.WorkbookLockedError("the file is in use")
+
+    monkeypatch.setattr(storage, "write_time_sheet", locked)
+    [result] = Monitor(replace(config, time_in_status=True), fake_client, now=clock).run().results
+    assert result.ok
+    assert load_workbook(workbooks(config)[0]).sheetnames == [storage.SHEET_TITLE]
 
 
 def test_first_run_creates_one_workbook(config, fake_client, make_payload, clock) -> None:
@@ -280,6 +321,29 @@ def test_only_status_changes_are_notified(config, fake_client, make_payload, clo
     assert len(read_records(workbooks(config)[0])) == 3
 
 
+def test_each_submission_can_have_its_own_settings(
+    config, fake_client, make_payload, clock
+) -> None:
+    """The general settings notify everything; one submission only reports its status."""
+    own = SubmissionConfig(
+        OTHER_UUID, label="Own", overrides={"notify_fields": ("Status",), "record_fields": ()}
+    )
+    config = replace(config, submissions=(*config.submissions, own))
+    fake_client.queue(DEMO_UUID, make_payload(), make_payload(LastUpdated=MAY_18))
+    other = {"PubdNumber": "ABC-D-26-00001"}
+    fake_client.queue(OTHER_UUID, make_payload(**other), make_payload(**other, LastUpdated=MAY_18))
+    monitor = Monitor(config, fake_client, now=clock)
+    first = monitor.run()
+    general, special = monitor.run().results
+
+    assert [result.is_new for result in first.results] == [True, True]
+    assert [c.field for c in general.changes] == ["Last review activity"]
+    assert [c.field for c in general.recorded_changes] == ["Last review activity"]
+    assert special.changes == []  # only changes of status are reported for it
+    assert special.recorded_changes == []  # and no change adds a row
+    assert len(workbooks(config)) == 2
+
+
 def test_changes_can_be_notified_without_being_recorded(
     config, fake_client, make_payload, clock
 ) -> None:
@@ -367,8 +431,8 @@ def paper_config(config: Config, template: str = "{paper}") -> Config:
         config,
         workbook_name=template,
         submissions=(
-            SubmissionConfig(DEMO_UUID, label="First journal", fields={"paper": "TMY"}),
-            SubmissionConfig(OTHER_UUID, label="Second journal", fields={"paper": "TMY"}),
+            SubmissionConfig(DEMO_UUID, label="First journal", fields={"paper": "Tau"}),
+            SubmissionConfig(OTHER_UUID, label="Second journal", fields={"paper": "Tau"}),
         ),
     )
 
@@ -382,13 +446,13 @@ def other_payload(make_payload, **changes: object) -> dict:
 def test_the_template_names_new_workbooks(config, fake_client, make_payload, clock) -> None:
     config = replace(
         paper_config(config, "{paper} - {journal_acronym} - {manuscript_number}"),
-        submissions=(SubmissionConfig(DEMO_UUID, fields={"paper": "TMY"}),),
+        submissions=(SubmissionConfig(DEMO_UUID, fields={"paper": "Tau"}),),
     )
     fake_client.queue(DEMO_UUID, make_payload())
     [result] = Monitor(config, fake_client, now=clock).run().results
-    assert result.workbook == config.data_dir / "TMY - SUBTRAK - SUBTRAK-D-22-00128.xlsx"
+    assert result.workbook == config.data_dir / "Tau - SUBTRAK - SUBTRAK-D-22-00128.xlsx"
     [row] = read_records(result.workbook)
-    assert row["Paper"] == "TMY"  # custom fields are written to extra columns
+    assert row["Paper"] == "Tau"  # custom fields are written to extra columns
 
 
 def test_submissions_of_a_paper_can_share_a_workbook(
@@ -406,7 +470,7 @@ def test_submissions_of_a_paper_can_share_a_workbook(
 
     assert [result.is_new for result in first.results] == [True, True]
     [path] = workbooks(config)
-    assert path.name == "TMY.xlsx"
+    assert path.name == "Tau.xlsx"
     assert [result.workbook for result in second.results] == [path, path]
     assert second.results[0].changes == []
     assert [c.field for c in second.results[1].changes] == ["Status", "Status code"]
@@ -416,7 +480,7 @@ def test_submissions_of_a_paper_can_share_a_workbook(
         ("OTHER-D-26-00042", "Under Review"),
         ("OTHER-D-26-00042", "Required Reviews Complete"),
     ]
-    assert {row["Paper"] for row in rows} == {"TMY"}
+    assert {row["Paper"] for row in rows} == {"Tau"}
 
 
 def test_changing_the_template_does_not_split_the_history(
@@ -428,7 +492,7 @@ def test_changing_the_template_does_not_split_the_history(
 
     renamed = replace(
         paper_config(config, "{paper} - {journal_acronym}"),
-        submissions=(SubmissionConfig(DEMO_UUID, fields={"paper": "TMY"}),),
+        submissions=(SubmissionConfig(DEMO_UUID, fields={"paper": "Tau"}),),
     )
     [result] = Monitor(renamed, fake_client, now=clock).run().results
 
@@ -459,4 +523,4 @@ def test_disappearing_submission_in_a_shared_workbook(
         ("OTHER-D-26-00042", "Under Review"),
         ("SUBTRAK-D-22-00128", UNAVAILABLE_STATUS),
     ]
-    assert rows[-1]["Paper"] == "TMY"
+    assert rows[-1]["Paper"] == "Tau"

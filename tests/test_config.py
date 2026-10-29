@@ -12,12 +12,15 @@ from paper_status_monitor.config import (
     DEFAULT_WORKBOOK_NAME,
     Config,
     ConfigError,
+    EmailConfig,
     SubmissionConfig,
     add_submission,
     describe_columns,
     describe_notify,
     dump_config,
+    edit_submission,
     find_submission,
+    is_email_address,
     load_config,
     parse_columns_option,
     parse_config,
@@ -84,6 +87,7 @@ def test_defaults(tmp_path: Path) -> None:
     assert config.open_report is True
     assert config.notify_on_errors is True
     assert config.ignore_fields == ()
+    assert config.time_in_status is False
 
 
 def test_relative_data_dir_is_relative_to_the_config_file(tmp_path: Path) -> None:
@@ -259,7 +263,8 @@ def test_legacy_ignore_fields_is_merged_into_notify_ignore(tmp_path: Path) -> No
         ("workbook_name = 3", "workbook_name"),
         ("workbook_name = '{paper}'", r"Unknown placeholder\(s\) \{paper\}"),
         ("workbook_name = '{journal'", "Invalid template"),
-        (f"[[submissions]]\nuuid = '{DEMO_UUID}'\nfields = 'TMY'", "'fields' must be a table"),
+        ("time_in_status = 'yes'", "'time_in_status'.*true or false"),
+        (f"[[submissions]]\nuuid = '{DEMO_UUID}'\nfields = 'Tau'", "'fields' must be a table"),
         (f"[[submissions]]\nuuid = '{DEMO_UUID}'\nfields = {{ 2x = 'a' }}", "Invalid custom"),
         (f"[[submissions]]\nuuid = '{DEMO_UUID}'\nfields = {{ title = 'a' }}", "built-in"),
         (f"[[submissions]]\nuuid = '{DEMO_UUID}'\nfields = {{ paper = true }}", "must be a text"),
@@ -280,7 +285,7 @@ workbook_name = "{{paper}} - {{journal}} - {{manuscript_number}}"
 
 [[submissions]]
 uuid = "{DEMO_UUID}"
-fields = {{ paper = "  TMY   paper ", year = 2026 }}
+fields = {{ paper = "  Tau   paper ", year = 2026 }}
 
 [[submissions]]
 uuid = "{OTHER_UUID}"
@@ -288,14 +293,14 @@ uuid = "{OTHER_UUID}"
         )
     )
     assert config.workbook_name == "{paper} - {journal} - {manuscript_number}"
-    assert dict(config.submissions[0].fields) == {"paper": "TMY paper", "year": "2026"}
+    assert dict(config.submissions[0].fields) == {"paper": "Tau paper", "year": "2026"}
     assert dict(config.submissions[1].fields) == {}
     assert config.custom_field_names == ("paper", "year")
 
 
 def test_submission_config_is_hashable_with_fields() -> None:
-    submission = SubmissionConfig(DEMO_UUID, fields={"paper": "TMY"})
-    assert submission == SubmissionConfig(DEMO_UUID, fields={"paper": "TMY"})
+    submission = SubmissionConfig(DEMO_UUID, fields={"paper": "Tau"})
+    assert submission == SubmissionConfig(DEMO_UUID, fields={"paper": "Tau"})
     assert submission != SubmissionConfig(DEMO_UUID, fields={"paper": "Other"})
     assert len({submission}) == 1
 
@@ -340,13 +345,13 @@ def test_parse_columns_option_errors() -> None:
 
 
 def test_parse_field_assignment() -> None:
-    assert parse_field_assignment("paper=TMY") == ("paper", "TMY")
+    assert parse_field_assignment("paper=Tau") == ("paper", "Tau")
     assert parse_field_assignment(" paper = A  b ") == ("paper", "A b")
     assert parse_field_assignment("note=a=b") == ("note", "a=b")
     with pytest.raises(ConfigError, match="NAME=VALUE"):
         parse_field_assignment("paper")
     with pytest.raises(ConfigError, match="Invalid custom field name"):
-        parse_field_assignment("my paper=TMY")
+        parse_field_assignment("my paper=Tau")
 
 
 # ------------------------------------------------------------------ writing
@@ -356,7 +361,12 @@ def full_config(tmp_path: Path) -> Config:
     return Config(
         data_dir=tmp_path / "My data",
         submissions=(
-            SubmissionConfig(DEMO_UUID, label="Demo 'quoted'", fields={"paper": "TMY"}),
+            SubmissionConfig(
+                DEMO_UUID,
+                label="Demo 'quoted'",
+                fields={"paper": "Tau"},
+                overrides={"notify_fields": ("Status",), "record_fields": None},
+            ),
             SubmissionConfig(OTHER_UUID, enabled=False, fields={"paper": 'A "b"', "x_2": "1"}),
         ),
         notify=(),
@@ -368,6 +378,7 @@ def full_config(tmp_path: Path) -> Config:
         ignore_fields=("Status code",),
         record_fields=None,
         record_ignore=("Last review activity",),
+        time_in_status=True,
     )
 
 
@@ -390,6 +401,11 @@ def test_dump_config_round_trips(tmp_path: Path) -> None:
     assert "open_report" not in text
     assert "enabled = false" in text
     assert "# Name of the workbooks." in text
+    assert (
+        "fields = { paper = 'Tau' }\nrecord_fields = \"all\"\nnotify_fields = ['Status']\n" in text
+    )
+    assert "\ntime_in_status = true\n" in text
+    assert loaded.time_in_status is True
 
 
 def test_save_config_keeps_a_backup(tmp_path: Path) -> None:
@@ -419,9 +435,9 @@ def test_save_config_creates_the_file(tmp_path: Path) -> None:
 
 def test_add_submission_with_fields(tmp_path: Path) -> None:
     path = write_config(tmp_path / "config.toml", tmp_path / "data")
-    add_submission(path, DEMO_UUID, label="Demo", fields={"paper": "TMY"})
-    assert dict(load_config(path).submissions[0].fields) == {"paper": "TMY"}
-    assert "fields = { paper = 'TMY' }" in path.read_text(encoding="utf-8")
+    add_submission(path, DEMO_UUID, label="Demo", fields={"paper": "Tau"})
+    assert dict(load_config(path).submissions[0].fields) == {"paper": "Tau"}
+    assert "fields = { paper = 'Tau' }" in path.read_text(encoding="utf-8")
 
 
 def test_add_submission_with_invalid_fields_leaves_the_file_unchanged(tmp_path: Path) -> None:
@@ -450,7 +466,7 @@ def test_parse_notify(value: object, expected: tuple[str, ...]) -> None:
     assert parse_notify(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "email", ["report", "none"], 3, [1]])
+@pytest.mark.parametrize("value", ["", "sms", ["report", "none"], 3, [1]])
 def test_parse_notify_errors(value: object) -> None:
     with pytest.raises(ConfigError, match="'notify' must be"):
         parse_notify(value)
@@ -498,13 +514,13 @@ def test_find_submission(tmp_path: Path) -> None:
     config = Config(
         data_dir=tmp_path,
         submissions=(
-            SubmissionConfig(DEMO_UUID, label="TMY paper"),
-            SubmissionConfig(OTHER_UUID, label="Comfort"),
+            SubmissionConfig(DEMO_UUID, label="Tau paper"),
+            SubmissionConfig(OTHER_UUID, label="Epsilon"),
         ),
     )
     link = f"https://track.authorhub.elsevier.com/?uuid={DEMO_UUID}"
-    assert find_submission(config, link).label == "TMY paper"
-    assert find_submission(config, " tmy PAPER ").uuid == DEMO_UUID
+    assert find_submission(config, link).label == "Tau paper"
+    assert find_submission(config, " tau PAPER ").uuid == DEMO_UUID
     assert find_submission(config, "2").uuid == OTHER_UUID
     with pytest.raises(ConfigError, match="No submission matches '3'"):
         find_submission(config, "3")
@@ -527,17 +543,17 @@ data_dir = 'data'  # next to this file
 
 # --- Submissions ---
 
-# The TMY paper, sent to Energy.
+# The Tau paper, sent to the Journal of Examples.
 [[submissions]]
 url = "https://track.authorhub.elsevier.com/?uuid={DEMO_UUID}"
-label = "TMY"   # short name
-fields = {{ paper = "TMY" }}
+label = "Tau"   # short name
+fields = {{ paper = "Tau" }}
 
 [[submissions]]
   uuid = "{OTHER_UUID}"
   enabled = true  # still under review
-  label = "Comfort"
-# a note about the comfort paper
+  label = "Epsilon"
+# a note about the epsilon paper
 
 [[submissions]]
 uuid = "{THIRD_UUID}"
@@ -554,11 +570,11 @@ def test_disable_adds_or_changes_the_enabled_line(tmp_path: Path) -> None:
     assert set_submission_enabled(path, THIRD_UUID, False)[1] is True
 
     text = path.read_text(encoding="utf-8")
-    assert 'fields = { paper = "TMY" }\nenabled = false\n\n[[submissions]]' in text
+    assert 'fields = { paper = "Tau" }\nenabled = false\n\n[[submissions]]' in text
     assert "  enabled = false  # still under review\n" in text
     assert f'uuid = "{THIRD_UUID}"\nenabled = false\n[submissions.fields]' in text
     assert text.startswith("# My settings, written by hand.\n")
-    assert "# The TMY paper, sent to Energy.\n" in text
+    assert "# The Tau paper, sent to the Journal of Examples.\n" in text
     config = load_config(path)
     assert [s.enabled for s in config.submissions] == [False, False, False]
     assert dict(config.submissions[2].fields) == {"paper": "Third"}
@@ -566,29 +582,29 @@ def test_disable_adds_or_changes_the_enabled_line(tmp_path: Path) -> None:
 
     assert set_submission_enabled(path, DEMO_UUID, True)[1] is True
     assert set_submission_enabled(path, DEMO_UUID, True)[1] is False  # nothing to change
-    assert 'fields = { paper = "TMY" }\nenabled = true\n' in path.read_text(encoding="utf-8")
+    assert 'fields = { paper = "Tau" }\nenabled = true\n' in path.read_text(encoding="utf-8")
 
 
 def test_remove_keeps_the_rest_of_the_file(tmp_path: Path) -> None:
     path = write(tmp_path / "config.toml", COMMENTED)
 
     removed = remove_submission(path, OTHER_UUID)
-    assert removed.label == "Comfort"
+    assert removed.label == "Epsilon"
     text = path.read_text(encoding="utf-8")
-    assert "Comfort" not in text
+    assert "Epsilon" not in text
     assert "still under review" not in text
-    assert "# a note about the comfort paper" in text  # not attached to the table
+    assert "# a note about the epsilon paper" in text  # not attached to the table
 
     remove_submission(path, DEMO_UUID)
     text = path.read_text(encoding="utf-8")
-    assert "# The TMY paper, sent to Energy." not in text  # attached to the table
-    assert "# --- Submissions ---\n\n# a note about the comfort paper\n\n[[submissions]]" in text
+    assert "# The Tau paper, sent to the Journal of Examples." not in text  # attached to the table
+    assert "# --- Submissions ---\n\n# a note about the epsilon paper\n\n[[submissions]]" in text
     assert "\n\n\n" not in text
     assert [s.uuid for s in load_config(path).submissions] == [THIRD_UUID]
 
     remove_submission(path, THIRD_UUID)
     assert load_config(path).submissions == ()
-    assert path.read_text(encoding="utf-8").endswith("# a note about the comfort paper\n")
+    assert path.read_text(encoding="utf-8").endswith("# a note about the epsilon paper\n")
 
 
 def test_editing_keeps_windows_line_endings(tmp_path: Path) -> None:
@@ -596,9 +612,13 @@ def test_editing_keeps_windows_line_endings(tmp_path: Path) -> None:
     path.write_bytes(COMMENTED.replace("\n", "\r\n").encode("utf-8"))
     set_submission_enabled(path, DEMO_UUID, False)
     remove_submission(path, OTHER_UUID)
+    edit_submission(path, THIRD_UUID, label="Third", fields={"paper": "3rd", "year": "2026"})
     data = path.read_bytes()
     assert data.count(b"\n") == data.count(b"\r\n")
-    assert [s.enabled for s in load_config(path).submissions] == [False, True]
+    config = load_config(path)
+    assert [s.enabled for s in config.submissions] == [False, True]
+    assert config.submissions[1].label == "Third"
+    assert dict(config.submissions[1].fields) == {"paper": "3rd", "year": "2026"}
 
 
 def test_remove_refuses_to_break_the_workbook_names(tmp_path: Path) -> None:
@@ -608,7 +628,7 @@ def test_remove_refuses_to_break_the_workbook_names(tmp_path: Path) -> None:
 
 [[submissions]]
 uuid = "{DEMO_UUID}"
-fields = {{ paper = "TMY" }}
+fields = {{ paper = "Tau" }}
 
 [[submissions]]
 uuid = "{OTHER_UUID}"
@@ -627,8 +647,92 @@ def test_unusual_layouts_are_not_edited(tmp_path: Path) -> None:
         set_submission_enabled(path, DEMO_UUID, False)
     with pytest.raises(ConfigError, match="could not be edited safely"):
         remove_submission(path, DEMO_UUID)
+    with pytest.raises(ConfigError, match="could not be edited safely"):
+        edit_submission(path, DEMO_UUID, label="Demo")
     assert path.read_bytes() == before
     assert not (tmp_path / "config.toml.bak").exists()
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        'fields.paper = "Tau"',  # dotted keys
+        'label = """Tau\npaper"""',  # a label written on two lines
+    ],
+)
+def test_unusual_keys_are_not_edited(tmp_path: Path, block: str) -> None:
+    path = write(tmp_path / "config.toml", f'[[submissions]]\nuuid = "{DEMO_UUID}"\n{block}\n')
+    before = path.read_bytes()
+    with pytest.raises(ConfigError, match="could not be edited safely"):
+        edit_submission(path, DEMO_UUID, label="Other", fields={"paper": "Other"})
+    assert path.read_bytes() == before
+
+
+def test_edit_changes_adds_and_removes_labels(tmp_path: Path) -> None:
+    path = write(tmp_path / "config.toml", COMMENTED)
+
+    before, after = edit_submission(path, DEMO_UUID, label="  Tau paper ")
+    assert (before.label, after.label) == ("Tau", "Tau paper")
+    edit_submission(path, THIRD_UUID, label="Third paper")
+    edit_submission(path, "epsilon", label="")
+
+    text = path.read_text(encoding="utf-8")
+    assert "label = 'Tau paper'   # short name\n" in text
+    assert f"uuid = \"{THIRD_UUID}\"\nlabel = 'Third paper'\n[submissions.fields]" in text
+    assert "Epsilon" not in text
+    assert "  enabled = true  # still under review\n# a note about the epsilon paper" in text
+    assert text.startswith("# My settings, written by hand.\n")
+    labels = [s.label for s in load_config(path).submissions]
+    assert labels == ["Tau paper", "", "Third paper"]
+    assert (tmp_path / "config.toml.bak").is_file()
+
+
+def test_edit_custom_fields_in_every_layout(tmp_path: Path) -> None:
+    path = write(tmp_path / "config.toml", COMMENTED)
+
+    edit_submission(path, DEMO_UUID, fields={"paper": "Tau", "year": "2026"})
+    edit_submission(path, OTHER_UUID, fields={"paper": "Epsilon"})
+    edit_submission(path, THIRD_UUID, fields={"paper": "Third", "project": "My thesis"})
+    text = path.read_text(encoding="utf-8")
+    assert "fields = { paper = 'Tau', year = '2026' }\n" in text
+    assert "  label = \"Epsilon\"\n  fields = { paper = 'Epsilon' }\n" in text
+    assert "[submissions.fields]\npaper = \"Third\"\nproject = 'My thesis'\n" in text
+    config = load_config(path)
+    assert [dict(s.fields) for s in config.submissions] == [
+        {"paper": "Tau", "year": "2026"},
+        {"paper": "Epsilon"},
+        {"paper": "Third", "project": "My thesis"},
+    ]
+
+    edit_submission(path, THIRD_UUID, fields={"project": "Thesis"})
+    assert "[submissions.fields]\nproject = 'Thesis'\n" in path.read_text(encoding="utf-8")
+    edit_submission(path, THIRD_UUID, fields={})
+    edit_submission(path, DEMO_UUID, fields={})
+    text = path.read_text(encoding="utf-8")
+    assert "[submissions.fields]" not in text
+    assert "year" not in text
+    assert text.endswith(f'[[submissions]]\nuuid = "{THIRD_UUID}"\n')
+    assert [dict(s.fields) for s in load_config(path).submissions] == [{}, {"paper": "Epsilon"}, {}]
+
+
+def test_edit_without_changes_does_not_write(tmp_path: Path) -> None:
+    path = write(tmp_path / "config.toml", COMMENTED)
+    before, after = edit_submission(path, DEMO_UUID, label="Tau", fields={"paper": " Tau "})
+    assert before == after
+    assert path.read_text(encoding="utf-8") == COMMENTED
+    assert not (tmp_path / "config.toml.bak").exists()
+
+
+def test_edit_refuses_invalid_changes(tmp_path: Path) -> None:
+    path = write(tmp_path / "config.toml", 'workbook_name = "{paper}"\n\n' + COMMENTED)
+    before = path.read_bytes()
+    with pytest.raises(ConfigError, match="built-in placeholder"):
+        edit_submission(path, DEMO_UUID, fields={"journal": "x"})
+    edit_submission(path, DEMO_UUID, fields={})  # the third submission still has {paper}
+    with pytest.raises(ConfigError, match=r"would make the configuration invalid.*placeholder"):
+        edit_submission(path, THIRD_UUID, fields={})
+    assert [dict(s.fields) for s in load_config(path).submissions][2] == {"paper": "Third"}
+    assert path.read_bytes() != before
 
 
 def test_editing_an_unknown_submission_fails(tmp_path: Path) -> None:
@@ -638,3 +742,186 @@ def test_editing_an_unknown_submission_fails(tmp_path: Path) -> None:
         remove_submission(path, "Nope")
     with pytest.raises(ConfigError, match="is not in"):
         set_submission_enabled(path, THIRD_UUID, False)
+
+
+# ------------------------------------------------------------------ own settings of a submission
+
+
+def test_own_settings_replace_the_general_settings_of_the_same_name(tmp_path: Path) -> None:
+    config = load_config(
+        write(
+            tmp_path / "config.toml",
+            f"""
+notify_ignore = ["Last review activity"]
+ignore_fields = ["Title"]
+record_ignore = ["Status code"]
+
+[[submissions]]
+uuid = "{DEMO_UUID}"
+notify_fields = ["status", "Last review activity"]
+
+[[submissions]]
+uuid = "{OTHER_UUID}"
+notify_ignore = []
+record_fields = "all"
+record_ignore = []
+
+[[submissions]]
+uuid = "{THIRD_UUID}"
+""",
+        )
+    )
+    demo, other, third = config.submissions
+    assert dict(demo.overrides) == {"notify_fields": ("Status", "Last review activity")}
+    assert config.notified_columns_for(demo) == ("Status",)  # the general ignore still applies
+    assert config.recorded_columns_for(demo) == config.recorded_columns
+    assert dict(other.overrides) == {
+        "notify_ignore": (),
+        "record_fields": None,
+        "record_ignore": (),
+    }
+    assert config.notified_columns_for(other) == TRACKED_COLUMNS  # replaces ignore_fields too
+    assert config.recorded_columns_for(other) == TRACKED_COLUMNS
+    assert third.overrides == {}
+    assert config.notified_columns_for(third) == config.notified_columns
+    assert config.recorded_columns_for(third) == config.recorded_columns
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("notify_fields = 'Status'", "'notify_fields' of submission #1"),
+        (
+            "record_ignore = ['Colour']",
+            "Unknown column 'Colour' in 'record_ignore' of submission #1",
+        ),
+        ("record_ignore = 'all'", "'record_ignore' of submission #1"),
+        ("ignore_fields = ['Title']", "unknown key"),
+    ],
+)
+def test_invalid_own_settings(tmp_path: Path, text: str, message: str) -> None:
+    content = f"[[submissions]]\nuuid = '{DEMO_UUID}'\n{text}\n"
+    with pytest.raises(ConfigError, match=message):
+        load_config(write(tmp_path / "config.toml", content))
+
+
+def test_edit_own_settings_in_place(tmp_path: Path) -> None:
+    path = write(tmp_path / "config.toml", COMMENTED)
+
+    edit_submission(path, DEMO_UUID, overrides={"notify_fields": ("Status",), "record_ignore": ()})
+    edit_submission(path, THIRD_UUID, overrides={"notify_ignore": ("last review activity",)})
+    text = path.read_text(encoding="utf-8")
+    assert "fields = { paper = \"Tau\" }\nrecord_ignore = []\nnotify_fields = ['Status']\n" in text
+    assert (
+        f"uuid = \"{THIRD_UUID}\"\nnotify_ignore = ['Last review activity']\n[submissions.fields]"
+    ) in text
+    demo, _, third = load_config(path).submissions
+    assert dict(demo.overrides) == {"notify_fields": ("Status",), "record_ignore": ()}
+    assert dict(third.overrides) == {"notify_ignore": ("Last review activity",)}
+
+    edit_submission(path, DEMO_UUID, overrides={"notify_fields": None})
+    text = path.read_text(encoding="utf-8")
+    assert 'fields = { paper = "Tau" }\nnotify_fields = "all"\n' in text
+    assert "record_ignore" not in text
+
+    edit_submission(path, DEMO_UUID, overrides={})
+    edit_submission(path, THIRD_UUID, overrides={})
+    assert all(not s.overrides for s in load_config(path).submissions)
+    assert "notify_" not in path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="unknown setting"):
+        edit_submission(path, DEMO_UUID, overrides={"notify": ("Status",)})
+    with pytest.raises(ConfigError, match="Unknown column 'Colour'"):
+        edit_submission(path, DEMO_UUID, overrides={"notify_fields": ("Colour",)})
+    with pytest.raises(ConfigError, match="list of column names"):
+        edit_submission(path, DEMO_UUID, overrides={"notify_ignore": None})
+
+
+# ------------------------------------------------------------------ e-mail
+
+
+def test_email_settings(tmp_path: Path) -> None:
+    text = """
+notify = ["report", "email"]
+
+[email]
+smtp_host = " smtp.example.org "
+security = "SSL"
+username = "me@example.org"
+to = "me@example.org, Co Author <co@example.org>"
+"""
+    config = load_config(write(tmp_path / "config.toml", text))
+    assert config.notify == ("report", "email")
+    assert config.email == EmailConfig(
+        smtp_host="smtp.example.org",
+        security="ssl",
+        username="me@example.org",
+        to=("me@example.org", "Co Author <co@example.org>"),
+    )
+    assert (config.email.port, config.email.from_address) == (465, "me@example.org")
+    assert config.email.missing == ()
+    assert describe_notify(config.notify) == (
+        "the report is opened and the report is sent by e-mail"
+    )
+    assert EmailConfig(security="none", smtp_port=2525).port == 2525
+    assert EmailConfig().missing == ("smtp_host", "to", "sender")
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ('notify = "email"', r"includes \"email\", but the \[email\] table lacks smtp_host"),
+        ("[email]\npassword = 'x'", "passwords are never read from the configuration file"),
+        ("[email]\nsmtp_password = 'x'", "passwords are never read"),
+        ("[email]\nserver = 'x'", r"Unknown setting\(s\) in \[email\]"),
+        ("[email]\nsmtp_port = 'x'", "must be a port number"),
+        ("[email]\nsmtp_port = 70000", "must be a port number"),
+        ("[email]\nsecurity = 'tls'", '"starttls", "ssl" or "none"'),
+        ("[email]\nto = 3", "must be an address or a list"),
+        ("[email]\nto = ['not an address']", r"'not an address' in \[email\]"),
+        ("[email]\nsender = 'me'", r"'me' in \[email\]"),
+        ("[email]\nsmtp_host = 3", r"'smtp_host' in \[email\]"),
+        ("email = 3", "'email'.*must be a table"),
+        (
+            'notify = "email"\n[email]\nsmtp_host = "h"\nusername = "jdoe"\nto = ["a@b.org"]',
+            "lacks sender",
+        ),
+    ],
+)
+def test_invalid_email_settings(tmp_path: Path, text: str, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write(tmp_path / "config.toml", text))
+
+
+def test_email_settings_are_written_and_read_back(tmp_path: Path) -> None:
+    settings = EmailConfig(
+        smtp_host="smtp.example.org",
+        smtp_port=2525,
+        security="none",
+        username="jdoe",
+        sender="Me <me@example.org>",
+        to=("me@example.org",),
+    )
+    text = dump_config(Config(data_dir=tmp_path, notify=("email",), email=settings))
+    assert "\n[email]\nsmtp_host = 'smtp.example.org'\nsmtp_port = 2525\n" in text
+    loaded = parse_config(config_module.tomllib.loads(text))
+    assert (loaded.notify, loaded.email) == (("email",), settings)
+
+    empty = dump_config(Config(data_dir=tmp_path))
+    assert "\n# [email]\n" in empty
+    assert parse_config(config_module.tomllib.loads(empty)).email == EmailConfig()
+
+
+@pytest.mark.parametrize(
+    ("text", "valid"),
+    [
+        ("me@example.org", True),
+        ("Me <me@example.org>", True),
+        ("me", False),
+        ("me@", False),
+        ("@example.org", False),
+        ("a@b@c.org", False),
+    ],
+)
+def test_is_email_address(text: str, valid: bool) -> None:
+    assert is_email_address(text) is valid

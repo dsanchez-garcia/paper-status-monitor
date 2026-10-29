@@ -24,7 +24,7 @@ def submission(**fields: str) -> SubmissionConfig:
 
 def test_placeholder_values(snapshot: Snapshot) -> None:
     revised = snapshot.replace(manuscript_number="SUBTRAK-D-22-00128R2", revision="2")
-    values = naming.placeholder_values(revised, submission(paper="TMY"))
+    values = naming.placeholder_values(revised, submission(paper="Tau"))
     assert values["manuscript_number"] == "SUBTRAK-D-22-00128"
     assert values["journal"] == JOURNAL
     assert values["journal_acronym"] == "SUBTRAK"
@@ -34,7 +34,7 @@ def test_placeholder_values(snapshot: Snapshot) -> None:
     assert values["date_of_submission"] == "2020-03-03"
     assert values["submission_year"] == "2020"
     assert values["label"] == "Demo"
-    assert values["paper"] == "TMY"
+    assert values["paper"] == "Tau"
 
 
 def test_placeholder_values_without_tracker_data() -> None:
@@ -58,18 +58,18 @@ def test_default_template_gives_the_names_of_previous_versions(snapshot: Snapsho
     [
         (
             "{paper} - {journal} - {manuscript_number}",
-            f"TMY - {JOURNAL} - SUBTRAK-D-22-00128.xlsx",
+            f"Tau - {JOURNAL} - SUBTRAK-D-22-00128.xlsx",
         ),
-        ("{paper}", "TMY.xlsx"),
-        ("{paper}_{journal_acronym}_{submission_year}", "TMY_SUBTRAK_2020.xlsx"),
-        ("{date_of_submission} {paper} ({journal_acronym})", "2020-03-03 TMY (SUBTRAK).xlsx"),
+        ("{paper}", "Tau.xlsx"),
+        ("{paper}_{journal_acronym}_{submission_year}", "Tau_SUBTRAK_2020.xlsx"),
+        ("{date_of_submission} {paper} ({journal_acronym})", "2020-03-03 Tau (SUBTRAK).xlsx"),
         ("{title:.10}", "Influence.xlsx"),
         ("All my submissions", "All my submissions.xlsx"),
-        ("{{{paper}}}", "{TMY}.xlsx"),
+        ("{{{paper}}}", "{Tau}.xlsx"),
     ],
 )
 def test_templates(snapshot: Snapshot, template: str, expected: str) -> None:
-    assert naming.workbook_file_name(template, snapshot, submission(paper="TMY")) == expected
+    assert naming.workbook_file_name(template, snapshot, submission(paper="Tau")) == expected
 
 
 @pytest.mark.parametrize(
@@ -90,9 +90,9 @@ def test_empty_placeholders_are_removed_with_their_separator(
 
 
 def test_values_are_cleaned_for_file_names(snapshot: Snapshot) -> None:
-    odd = snapshot.replace(journal="Energy: Policy/Practice?")
+    odd = snapshot.replace(journal="Examples: Policy/Practice?")
     name = naming.workbook_file_name("{paper} - {journal}", odd, submission(paper='A "big" one'))
-    assert name == "A big one - Energy PolicyPractice.xlsx"
+    assert name == "A big one - Examples PolicyPractice.xlsx"
 
 
 def test_long_names_are_cut_at_a_word_boundary(snapshot: Snapshot) -> None:

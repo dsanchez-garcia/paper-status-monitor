@@ -12,7 +12,7 @@ from paper_status_monitor.client import DEMO_UUID
 from paper_status_monitor.config import SubmissionConfig
 from paper_status_monitor.models import Change, Snapshot
 from paper_status_monitor.monitor import RunSummary, SubmissionResult
-from paper_status_monitor.notifications import Notification
+from paper_status_monitor.notifications import Notification, NotificationButton
 
 STARTED = datetime(2026, 1, 2, 9, 30, 0)
 OTHER_UUID = "11111111-2222-3333-4444-555555555555"
@@ -58,16 +58,61 @@ def test_no_news_no_notification(snapshot: Snapshot) -> None:
 def test_one_changed_submission(snapshot: Snapshot, tmp_path: Path) -> None:
     result = changed(
         snapshot,
-        "TMY paper",
+        "Tau paper",
         Change("Status", "Under Review", "Required Reviews Complete"),
         Change("Reviews completed", "1", "2"),
     )
     report = tmp_path / "changes.txt"
     notification = notifications.build_notification(summary(result), report=report)
     assert notification == Notification(
-        "Status changed: TMY paper",
+        "Status changed: Tau paper",
         "Status: Under Review → Required Reviews Complete\nReviews completed: 1 → 2",
         report,
+        (
+            NotificationButton("Open report", report),
+            NotificationButton("Tracking page", result.submission.tracker_url),
+        ),
+    )
+
+
+def test_buttons_open_the_report_the_workbook_and_the_tracking_page(
+    snapshot: Snapshot, tmp_path: Path
+) -> None:
+    workbook = tmp_path / "Tau.xlsx"
+    workbook.write_bytes(b"")
+    report = tmp_path / "changes.txt"
+    result = replace(changed(snapshot, "Tau"), workbook=workbook)
+    notification = notifications.build_notification(summary(result), report=report)
+    assert notification is not None
+    assert notification.buttons == (
+        NotificationButton("Open report", report),
+        NotificationButton("Open workbook", workbook),
+        NotificationButton("Tracking page", result.submission.tracker_url),
+    )
+    missing = replace(result, workbook=tmp_path / "not written yet.xlsx")
+    labels = [button.label for button in notifications.build_notification(summary(missing)).buttons]
+    assert labels == ["Tracking page"]  # no report, and the workbook does not exist
+    broken = notifications.build_notification(summary(failed()), report=report)
+    assert [button.label for button in broken.buttons] == ["Open report", "Tracking page"]
+
+
+def test_buttons_of_several_submissions(snapshot: Snapshot, tmp_path: Path) -> None:
+    shared, other = tmp_path / "Tau.xlsx", tmp_path / "Epsilon.xlsx"
+    for path in (shared, other):
+        path.write_bytes(b"")
+    report = tmp_path / "changes.txt"
+    first = replace(changed(snapshot, "Tau R1"), workbook=shared)
+    second = replace(new(snapshot), workbook=shared)
+    together = notifications.build_notification(summary(first, second), report=report)
+    assert together.buttons == (
+        NotificationButton("Open report", report),
+        NotificationButton("Open workbook", shared),
+    )
+    apart = replace(second, workbook=other)
+    separate = notifications.build_notification(summary(first, apart, failed()), report=report)
+    assert separate.buttons == (
+        NotificationButton("Open report", report),
+        NotificationButton("Open folder", tmp_path),
     )
 
 
@@ -90,17 +135,17 @@ def test_one_failed_check() -> None:
 
 def test_several_submissions(snapshot: Snapshot) -> None:
     two_changes = changed(
-        snapshot, "TMY", Change("Status", "a", "b"), Change("Reviews completed", "1", "2")
+        snapshot, "Tau", Change("Status", "a", "b"), Change("Reviews completed", "1", "2")
     )
     notification = notifications.build_notification(
-        summary(two_changes, new(snapshot), failed("Comfort"))
+        summary(two_changes, new(snapshot), failed("Epsilon"))
     )
     assert notification is not None
     assert notification.title == "Paper status: 1 changed, 1 new, 1 failed"
     lines = notification.message.splitlines()
-    assert lines[0] == "TMY: Status → b (+1 more)"
+    assert lines[0] == "Tau: Status → b (+1 more)"
     assert lines[1].endswith(": now tracked")
-    assert lines[2] == "Comfort: could not be checked"
+    assert lines[2] == "Epsilon: could not be checked"
 
 
 def test_long_lists_are_cut(snapshot: Snapshot) -> None:
@@ -109,7 +154,7 @@ def test_long_lists_are_cut(snapshot: Snapshot) -> None:
     assert notification is not None
     lines = notification.message.splitlines()
     assert len(lines) == notifications.MAX_LINES
-    assert lines[-1] == "... and 3 more submission(s): see the report"
+    assert lines[-1] == "... and 3 more submissions: see the report"
 
 
 def test_names_fall_back_to_the_title_and_the_uuid(snapshot: Snapshot) -> None:
@@ -126,7 +171,28 @@ def test_toast_xml_escapes_the_text_and_links_the_report(tmp_path: Path) -> None
     assert "<text>a → b\nc</text>" in xml
     assert 'activationType="protocol"' in xml
     assert "my%20reports/changes.txt" in xml
+    assert "<actions>" not in xml
     assert "launch=" not in notifications.toast_xml(Notification("t", "m"))
+
+
+def test_toast_xml_buttons_use_protocol_activation(tmp_path: Path) -> None:
+    workbook = tmp_path / "Tau & co.xlsx"
+    buttons = (
+        NotificationButton("Open workbook", workbook),
+        NotificationButton("Tracking page", "https://example.org/?uuid=1&x=2"),
+        NotificationButton("Ignored", "javascript:alert(1)"),
+        NotificationButton("Fourth", "https://example.org/4"),
+        NotificationButton("Fifth", "https://example.org/5"),
+    )
+    xml = notifications.toast_xml(Notification("t", "m", buttons=buttons))
+    actions = xml[xml.index("<actions>") : xml.index("</actions>")]
+    assert actions.count("<action ") == 2  # unsupported targets and extra buttons are dropped
+    assert '<action content="Open workbook" activationType="protocol" arguments="file:' in xml
+    assert "Tau%20%26%20co.xlsx" in xml
+    assert 'arguments="https://example.org/?uuid=1&amp;x=2"' in xml
+    assert "javascript" not in xml
+    assert "Fourth" not in xml
+    assert xml.index("</visual>") < xml.index("<actions>") < xml.index("</toast>")
 
 
 def test_sample_notification() -> None:

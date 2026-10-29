@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -81,6 +82,8 @@ def run_every(
     sleep: Callable[[float], object] = time.sleep,
     poll: float = POLL_SECONDS,
     max_runs: int | None = None,
+    wake: threading.Event | None = None,
+    stop: threading.Event | None = None,
 ) -> int:
     """Call *task* now and then once every *interval*, until interrupted.
 
@@ -91,13 +94,16 @@ def run_every(
         task: The work to repeat (one complete check).
         interval: Time between the starts of two calls.
         clock: Wall clock in seconds since the epoch (injectable for tests).
-        sleep: Function used to wait (injectable for tests).
+        sleep: Function used to wait (injectable for tests); not used with *wake*.
         poll: Longest single wait, in seconds, so that the end of a sleep or
             hibernation of the computer is noticed quickly.
         max_runs: Stop after this many calls; ``None`` repeats forever.
+        wake: Set it to call *task* at once instead of waiting until it is due (for
+            instance, *Check now* in the tray icon). The waiting is done on it.
+        stop: Set it (and *wake*, to end the waiting at once) to stop the loop.
 
     Returns:
-        The number of calls made, when *max_runs* is reached.
+        The number of calls made, when *max_runs* is reached or *stop* is set.
 
     Raises:
         ValueError: If *interval* or *poll* is not positive.
@@ -107,6 +113,10 @@ def run_every(
         raise ValueError("The interval and the polling period must be positive.")
     runs = 0
     while True:
+        if stop is not None and stop.is_set():
+            return runs
+        if wake is not None:
+            wake.clear()
         started = clock()
         try:
             task()
@@ -118,11 +128,20 @@ def run_every(
         due = started + period
         log.info("Next check at about %s", _local_time(due))
         while True:
+            if stop is not None and stop.is_set():
+                return runs
+            if wake is not None and wake.is_set():
+                log.info("Check requested before it was due.")
+                break
             now = clock()
             due = min(due, now + period)  # the system clock went back: do not wait longer
             if now >= due:
                 break
-            sleep(min(poll, due - now))
+            step = min(poll, due - now)
+            if wake is not None:
+                wake.wait(step)
+            else:
+                sleep(step)
 
 
 def _local_time(timestamp: float) -> str:

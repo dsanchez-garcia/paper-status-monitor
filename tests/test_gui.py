@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -12,8 +13,10 @@ from paper_status_monitor import gui, naming
 from paper_status_monitor.client import DEMO_UUID
 from paper_status_monitor.config import (
     ConfigError,
+    EmailConfig,
     SubmissionConfig,
     add_submission,
+    edit_submission,
     load_config,
     write_config,
 )
@@ -26,13 +29,13 @@ OTHER_UUID = "11111111-2222-3333-4444-555555555555"
 def test_parse_fields_text() -> None:
     text = """
     # one field per line
-    paper = TMY
+    paper = Tau
     project: "My thesis"
     note = a = b
 
     """
     assert gui.parse_fields_text(text) == {
-        "paper": "TMY",
+        "paper": "Tau",
         "project": "My thesis",
         "note": "a = b",
     }
@@ -42,7 +45,7 @@ def test_parse_fields_text() -> None:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("paper TMY", "must look like"),
+        ("paper Tau", "must look like"),
         ("2paper = x", "Invalid custom field name"),
         ("journal = x", "built-in placeholder"),
         ("paper = a\npaper = b", "twice"),
@@ -54,9 +57,31 @@ def test_parse_fields_text_errors(text: str, message: str) -> None:
 
 
 def test_format_fields() -> None:
-    fields = {"paper": "TMY", "project": "My thesis"}
+    fields = {"paper": "Tau", "project": "My thesis"}
     assert gui.parse_fields_text(gui.format_fields_text(fields)) == fields
-    assert gui.format_fields_inline(fields) == "paper=TMY, project=My thesis"
+    assert gui.format_fields_inline(fields) == "paper=Tau, project=My thesis"
+
+
+def test_effective_columns_and_own_settings() -> None:
+    general = [column for column in TRACKED_COLUMNS if column != "Last review activity"]
+    assert gui.effective_columns(general, {}, "notify") == tuple(general)
+    own_fields = {"notify_fields": ("Status", "Last review activity")}
+    assert gui.effective_columns(general, own_fields, "notify") == ("Status",)
+    assert gui.effective_columns(general, {"notify_ignore": ()}, "notify") == TRACKED_COLUMNS
+    assert gui.effective_columns(general, {"record_fields": ("Status",)}, "record") == ("Status",)
+    assert gui.own_settings(recorded=TRACKED_COLUMNS, notified=["Status"]) == {
+        "record_fields": None,
+        "record_ignore": (),
+        "notify_fields": ("Status",),
+        "notify_ignore": (),
+    }
+
+
+def test_build_config_keeps_the_own_settings(tmp_path: Path) -> None:
+    own = {"notify_fields": ("Status",), "record_fields": None, "record_ignore": ()}
+    submissions = [SubmissionConfig(DEMO_UUID, overrides=own)]
+    config = gui.build_config(**config_values(tmp_path, submissions=submissions))
+    assert dict(config.submissions[0].overrides) == own
 
 
 def config_values(tmp_path: Path, **changes: Any) -> dict[str, Any]:
@@ -76,7 +101,7 @@ def config_values(tmp_path: Path, **changes: Any) -> dict[str, Any]:
 
 
 def test_build_config(tmp_path: Path) -> None:
-    submissions = [SubmissionConfig(DEMO_UUID, label="Demo", fields={"paper": "TMY"})]
+    submissions = [SubmissionConfig(DEMO_UUID, label="Demo", fields={"paper": "Tau"})]
     notified = [column for column in TRACKED_COLUMNS if column != "Last review activity"]
     config = gui.build_config(
         **config_values(
@@ -127,7 +152,7 @@ def test_preview_rows(tmp_path: Path) -> None:
         },
     )
     submissions = [
-        SubmissionConfig(DEMO_UUID, label="Demo", fields={"paper": "TMY"}),
+        SubmissionConfig(DEMO_UUID, label="Demo", fields={"paper": "Tau"}),
         SubmissionConfig(OTHER_UUID, fields={"paper": "Next"}),
     ]
     config = gui.build_config(
@@ -136,7 +161,7 @@ def test_preview_rows(tmp_path: Path) -> None:
         )
     )
     assert gui.preview_rows(config) == [
-        ("Demo", "Old name.xlsx", "TMY - ABC.xlsx"),
+        ("Demo", "Old name.xlsx", "Tau - ABC.xlsx"),
         (OTHER_UUID, "(not recorded yet)", "Next - ABC.xlsx (example)"),
     ]
 
@@ -230,19 +255,89 @@ def configured(tmp_path: Path, **fields: str) -> Path:
     return path
 
 
+def test_configured_language(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    assert gui.configured_language(path) == "en"  # no file yet
+    path.write_text('language = "es"\nunknown_setting = 1\n', encoding="utf-8")
+    assert gui.configured_language(path) == "es"  # even if another setting is invalid
+    for text in ('language = "xx"\n', "language = [\n"):
+        path.write_text(text, encoding="utf-8")
+        assert gui.configured_language(path) == "en"
+
+
+def test_window_in_spanish(make_app, tmp_path: Path) -> None:
+    path = write_config(tmp_path / "config.toml", tmp_path / "data", language="es")
+    add_submission(path, DEMO_UUID, label="Demo")
+    app = make_app(path)
+    assert app.messages == []
+    assert not app.dirty
+    assert app.notebook.tab(0, "text") == "Envíos"
+    assert app.language_var.get() == "Español"
+    assert tuple(app.tree.item(DEMO_UUID, "values"))[2] == "sí"
+    assert app.statuses[DEMO_UUID] == "aún sin registrar"
+    assert app.selection_var.get().startswith("Se registra: todas las columnas.")
+    assert app.status_var.get().startswith("Configuración: ")
+
+    app.template_var.set("{journal}")
+    app.write_output("previous output\n")
+    app.notebook.select(2)
+    app.language_var.set("English")  # rebuilds the window in English
+    assert app.notebook.tab(0, "text") == "Submissions"
+    assert app._menu is not None
+    assert app._menu.entrycget(1, "label") == "File"
+    assert app.notebook.index("current") == 2
+    assert app.output.get("1.0", "end-1c") == "previous output\n"
+    assert app.template_var.get() == "{journal}"
+    assert app.statuses[DEMO_UUID] == "not recorded yet"
+    assert app.dirty
+    assert app.save()
+    assert load_config(path).language == "en"
+
+
+def test_an_invalid_configuration_keeps_its_language(make_app, tmp_path: Path) -> None:
+    path = write_config(tmp_path / "config.toml", tmp_path / "data", language="es")
+    path.write_text(path.read_text(encoding="utf-8") + "\nunknown_setting = 1\n", "utf-8")
+    app = make_app(path)
+    kind, title, message = app.messages[0]
+    assert (kind, title) == ("error", "Configuración no válida")
+    assert "unknown_setting" in message
+    assert app.language_var.get() == "Español"
+    assert app.notebook.tab(0, "text") == "Envíos"
+
+
+def test_changing_the_language_keeps_the_typed_autostart_values(
+    make_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from paper_status_monitor import _gui_app
+
+    arguments = "-m paper_status_monitor run --wait 30 --every 12h"
+    info = _gui_app.autostart.LauncherInfo(tmp_path / "x.lnk", sys.executable, arguments, "")
+    monkeypatch.setattr(_gui_app.autostart, "is_supported", lambda: True)
+    monkeypatch.setattr(_gui_app.autostart, "status", lambda: info)
+    app = make_app(configured(tmp_path))
+    assert (app.wait_var.get(), app.every_var.get()) == ("30", "12")
+    app.wait_var.set("90")
+    app.every_var.set("24")
+    app.language_var.set("Español")
+    assert (app.wait_var.get(), app.every_var.get()) == ("90", "24")
+    assert app.autostart_var.get().startswith("Activado: cada vez que inicies sesión")
+
+
 def test_window_shows_and_saves_the_configuration(make_app, tmp_path: Path) -> None:
-    path = configured(tmp_path, paper="TMY")
+    path = configured(tmp_path, paper="Tau")
     app = make_app(path)
     assert app.messages == []
     assert not app.dirty
     assert app.tree.get_children() == (DEMO_UUID,)
-    assert tuple(app.tree.item(DEMO_UUID, "values"))[:3] == ("Demo", "paper=TMY", "yes")
+    assert tuple(app.tree.item(DEMO_UUID, "values"))[:3] == ("Demo", "paper=Tau", "yes")
     assert app.statuses[DEMO_UUID] == "not recorded yet"
     assert "{paper}" in app.placeholders_var.get()
     assert app.autostart_var.get()
 
     app.notify_vars["Last review activity"].set(False)
     app.template_var.set("{paper} - {journal_acronym}")
+    assert not app.time_sheet_var.get()
+    app.time_sheet_var.set(True)
     assert app.dirty
     assert "all columns except Last review activity" in app.selection_var.get()
     assert app.save()
@@ -250,6 +345,7 @@ def test_window_shows_and_saves_the_configuration(make_app, tmp_path: Path) -> N
     config = load_config(path)
     assert config.notify_ignore == ("Last review activity",)
     assert config.workbook_name == "{paper} - {journal_acronym}"
+    assert config.time_in_status is True
     assert (tmp_path / "config.toml.bak").is_file()
     assert not app.dirty
 
@@ -263,7 +359,7 @@ def test_window_manages_submissions(make_app, tmp_path: Path) -> None:
     dialog.window.withdraw()
     dialog.link_var.set(f"https://track.authorhub.elsevier.com/?uuid={DEMO_UUID}")
     dialog.label_var.set("Demo")
-    dialog.set_fields_text("paper = TMY")
+    dialog.set_fields_text("paper = Tau")
     dialog.verify_var.set(False)
     assert dialog.submit() is not None
     assert [s.uuid for s in app.submissions] == [DEMO_UUID]
@@ -282,21 +378,71 @@ def test_window_manages_submissions(make_app, tmp_path: Path) -> None:
     edit = app.edit_submission()
     assert edit is not None
     edit.window.withdraw()
-    edit.set_fields_text("paper = TMY\nproject = Thesis")
+    edit.set_fields_text("paper = Tau\nproject = Thesis")
     edit.submit()
-    assert dict(app.submissions[0].fields) == {"paper": "TMY", "project": "Thesis"}
+    assert dict(app.submissions[0].fields) == {"paper": "Tau", "project": "Thesis"}
     assert app.save()
     saved = load_config(path).submissions[0]
     assert (saved.enabled, saved.label, dict(saved.fields)) == (
         False,
         "Demo",
-        {"paper": "TMY", "project": "Thesis"},
+        {"paper": "Tau", "project": "Thesis"},
     )
 
     app.tree.selection_set(DEMO_UUID)
     app.remove_submission()
     assert app.submissions == []
     assert app.tree.get_children() == ()
+
+
+def test_window_edits_the_own_settings_of_a_submission(make_app, tmp_path: Path) -> None:
+    path = configured(tmp_path)
+    edit_submission(path, DEMO_UUID, overrides={"notify_fields": ("Status",)})  # by hand
+    app = make_app(path)
+    assert tuple(app.tree.item(DEMO_UUID, "values"))[2] == "yes *"
+
+    def open_dialog() -> Any:
+        app.tree.selection_set(DEMO_UUID)
+        dialog = app.edit_submission()
+        dialog.window.withdraw()
+        return dialog
+
+    dialog = open_dialog()
+    assert dialog.own_var.get()
+    assert [c for c, var in dialog.own_notify_vars.items() if var.get()] == ["Status"]
+    dialog.label_var.set("Renamed")
+    dialog.submit()  # the own settings were not touched: they are kept as written
+    assert dict(app.submissions[0].overrides) == {"notify_fields": ("Status",)}
+
+    app.tree.selection_set(DEMO_UUID)
+    app.toggle_submission()  # pausing keeps them too
+    assert dict(app.submissions[0].overrides) == {"notify_fields": ("Status",)}
+
+    dialog = open_dialog()
+    dialog.own_var.set(False)
+    dialog.update_own_state()
+    assert dialog.own_buttons[0].instate(["disabled"])
+    dialog.submit()
+    assert app.submissions[0].overrides == {}
+    assert tuple(app.tree.item(DEMO_UUID, "values"))[2] == "no (paused)"
+
+    dialog = open_dialog()
+    dialog.own_var.set(True)
+    dialog.update_own_state()
+    assert not dialog.own_buttons[0].instate(["disabled"])
+    dialog.own_notify_vars["Last review activity"].set(False)
+    dialog.own_record_vars["Status code"].set(False)
+    dialog.submit()
+    expected = {
+        "record_fields": None,
+        "record_ignore": ("Status code",),
+        "notify_fields": None,
+        "notify_ignore": ("Last review activity",),
+    }
+    assert dict(app.submissions[0].overrides) == expected
+    assert app.save()
+    saved = load_config(path).submissions[0]
+    assert (saved.label, saved.enabled, dict(saved.overrides)) == ("Renamed", False, expected)
 
 
 def test_window_checks_new_links_with_the_tracker(
@@ -345,20 +491,20 @@ def test_window_previews_and_organizes_workbook_names(
 ) -> None:
     monkeypatch.setattr("paper_status_monitor.monitor.TrackerClient", lambda **kw: fake_client)
     fake_client.queue(DEMO_UUID, make_payload())
-    app = make_app(configured(tmp_path, paper="TMY"))
+    app = make_app(configured(tmp_path, paper="Tau"))
     app.run_check()
 
     app.template_var.set("{paper}")
     app.update_preview()
     rows = [tuple(app.preview.item(item, "values")) for item in app.preview.get_children()]
-    assert [(row[0], row[2]) for row in rows] == [("Demo", "TMY.xlsx")]
+    assert [(row[0], row[2]) for row in rows] == [("Demo", "Tau.xlsx")]
 
     app.organize_workbooks()  # saves first (the answer is yes), then shows the plan
     title, text, action = app.windows[-1]
     assert title == "Organize workbooks"
-    assert "->  TMY.xlsx" in text
+    assert "->  Tau.xlsx" in text
     action[1]()  # Apply
-    assert [p.name for p in (tmp_path / "data").glob("*.xlsx")] == ["TMY.xlsx"]
+    assert [p.name for p in (tmp_path / "data").glob("*.xlsx")] == ["Tau.xlsx"]
     assert "Renamed" in app.messages[-1][2]
 
     app.template_var.set("{nope}")
@@ -466,6 +612,27 @@ def test_window_shows_and_saves_the_summary(
     assert "summary.md" in app.status_var.get()
 
 
+def test_window_exports_the_history(
+    make_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client, make_payload
+) -> None:
+    from paper_status_monitor import _gui_app
+
+    monkeypatch.setattr("paper_status_monitor.monitor.TrackerClient", lambda **kw: fake_client)
+    fake_client.queue(DEMO_UUID, make_payload())
+    app = make_app(configured(tmp_path))
+    app.run_check()
+    target = tmp_path / "history.json"
+    monkeypatch.setattr(_gui_app.filedialog, "asksaveasfilename", lambda **kwargs: str(target))
+
+    assert app.export_history() == target
+
+    [submission] = json.loads(target.read_text(encoding="utf-8"))["submissions"]
+    assert submission["submission"] == "Demo"
+    assert len(submission["rows"]) == 1
+    assert "tracker_url" not in submission
+    assert "history.json" in app.status_var.get()
+
+
 def test_window_enables_periodic_checks(
     make_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -473,7 +640,7 @@ def test_window_enables_periodic_checks(
 
     calls: list[dict[str, Any]] = []
     shortcut = tmp_path / "paper-status-monitor.lnk"
-    info = _gui_app.autostart.ShortcutInfo(
+    info = _gui_app.autostart.LauncherInfo(
         shortcut, sys.executable, "-m paper_status_monitor run --wait 120 --every 12h", ""
     )
     monkeypatch.setattr(_gui_app.autostart, "is_supported", lambda: True)
@@ -495,3 +662,108 @@ def test_window_enables_periodic_checks(
     app.enable_autostart()
     assert app.messages[-1][:2] == ("error", "Invalid value")
     assert len(calls) == 1
+
+
+def test_window_enables_the_tray_icon(
+    make_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from paper_status_monitor import _gui_app
+
+    calls: list[dict[str, Any]] = []
+    shortcut = tmp_path / "paper-status-monitor.lnk"
+    arguments = "-m paper_status_monitor run --wait 300 --every 12h --tray"
+    info = _gui_app.autostart.LauncherInfo(shortcut, sys.executable, arguments, "")
+    monkeypatch.setattr(_gui_app.autostart, "is_supported", lambda: True)
+    monkeypatch.setattr(_gui_app.tray, "is_supported", lambda: True)
+    monkeypatch.setattr(_gui_app.autostart, "status", lambda: info)
+    monkeypatch.setattr(
+        _gui_app.autostart, "enable", lambda **kwargs: calls.append(kwargs) or shortcut
+    )
+    app = make_app(configured(tmp_path))
+    assert app.tray_var.get() is True  # read from the shortcut
+    assert "with an icon in the notification area" in app.autostart_var.get()
+
+    app.enable_autostart()
+    assert calls[-1]["tray"] is True
+    assert "An icon in the notification area" in app.messages[-1][2]
+
+    app.every_var.set("0")
+    app.enable_autostart()
+    assert app.messages[-1][:2] == ("error", "Invalid value")
+    assert len(calls) == 1
+    app.tray_var.set(False)
+    app.enable_autostart()
+    assert calls[-1]["tray"] is False
+
+
+# ------------------------------------------------------------------ e-mail
+
+
+def test_email_settings_typed_in_the_window(tmp_path: Path) -> None:
+    settings = gui.email_settings(
+        smtp_host=" smtp.example.org ",
+        smtp_port="2525",
+        security="none",
+        username="jdoe",
+        sender="me@example.org",
+        to="me@example.org, Co <co@example.org>",
+    )
+    assert settings == EmailConfig(
+        smtp_host="smtp.example.org",
+        smtp_port=2525,
+        security="none",
+        username="jdoe",
+        sender="me@example.org",
+        to=("me@example.org", "Co <co@example.org>"),
+    )
+    assert gui.email_table(settings)["smtp_port"] == 2525
+    config = gui.build_config(**config_values(tmp_path, notify=["email"]), email=settings)
+    assert (config.notify, config.email) == (("email",), settings)
+    with pytest.raises(ConfigError, match="lacks smtp_host"):
+        gui.build_config(**config_values(tmp_path, notify=["email"]))
+
+    fields = {"smtp_host": "h", "security": "starttls", "username": "", "sender": "", "to": "x"}
+    with pytest.raises(ConfigError, match="The port must be a number"):
+        gui.email_settings(smtp_port="25a", **fields)
+    with pytest.raises(ConfigError, match="'x' in \\[email\\]"):
+        gui.email_settings(smtp_port="", **fields)
+
+
+def test_window_manages_the_email_settings(make_app, tmp_path: Path, smtp, fake_keyring) -> None:
+    path = configured(tmp_path)
+    app = make_app(path)
+    app.send_test_email()
+    assert app.messages[-1][:2] == ("error", "E-mail settings needed")
+
+    dialog = app.edit_email_settings()
+    dialog.window.withdraw()
+    dialog.host_var.set("smtp.example.org")
+    dialog.port_var.set("x")
+    assert dialog.submit() is None
+    assert app.messages[-1][1] == "Invalid e-mail settings"
+    dialog.port_var.set("")
+    dialog.username_var.set("me@example.org")
+    dialog.to_var.set("me@example.org, co@example.org")
+    dialog.password_var.set("secret")
+    assert dialog.save_password() is True
+    assert fake_keyring.passwords == {("paper-status-monitor", "me@example.org"): "secret"}
+    settings = dialog.submit()
+    assert settings == EmailConfig(
+        smtp_host="smtp.example.org",
+        username="me@example.org",
+        to=("me@example.org", "co@example.org"),
+    )
+    assert app.dirty
+
+    app.send_test_email()
+    assert app.messages[-1][1] == "Test e-mail"
+    assert [message["Subject"] for message in smtp.sent()] == [
+        "[paper-status-monitor] Test message"
+    ]
+
+    app.email_var.set(True)
+    assert app.save()
+    config = load_config(path)
+    assert config.notify == ("report", "email")
+    assert config.email == settings
+    assert "secret" not in path.read_text(encoding="utf-8")
